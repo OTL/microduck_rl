@@ -7669,3 +7669,148 @@ def roulade_lateral_velocity_penalty(
     """Body-frame lateral (y) linear velocity² — keeps the roll straight."""
     asset: Entity = env.scene[asset_cfg.name]
     return torch.nan_to_num(asset.data.root_link_lin_vel_b[:, 1].pow(2), nan=0.0)
+
+
+
+
+# ==============================================================================
+# Tumble — perpetual forward roll (tuck and keep rolling, faster is better)
+# ==============================================================================
+# Reuses the roulade rotation accumulator (support-gated, flatness-gated
+# integral of forward pitch rate, see _update_roulade_accum) but pays its
+# frontier WITHOUT the one-turn cap. Extra per-env state:
+#   env._tumble_paid     — frontier value already paid out (rad)
+#   env._tumble_rate     — frontier advance rate this step (rad/s, ≥ 0)
+#   env._tumble_rate_ema — ~0.4 s EMA of that rate (gate for the travel term)
+
+_TUMBLE_RATE_EMA_ALPHA = 0.05   # per 50 Hz step → ~0.4 s time constant
+_TUMBLE_RATE_EMA_MAX = 20.0     # rad/s, keeps a solver spike out of the EMA
+
+
+def _tumble_state(env: ManagerBasedRlEnv) -> None:
+    _roulade_state(env)
+    if not hasattr(env, "_tumble_paid"):
+        env._tumble_paid = env._roulade_max.clone()
+        env._tumble_rate = torch.zeros(env.num_envs, device=env.device)
+        env._tumble_rate_ema = torch.zeros(env.num_envs, device=env.device)
+        env._tumble_last_update_step = -1
+
+
+def _update_tumble(env: ManagerBasedRlEnv, asset: Entity) -> None:
+    """Advance the paid pointer to the rotation frontier (step-guarded).
+
+    The frontier only moves forward, so rocking back and forth below it has a
+    rate of exactly zero — only NEW forward rotation counts.
+    """
+    _tumble_state(env)
+    _update_roulade_accum(env, asset)
+    step = int(env.common_step_counter)
+    if step != env._tumble_last_update_step:
+        frontier = env._roulade_max
+        delta = torch.clamp(frontier - env._tumble_paid, min=0.0)
+        env._tumble_paid = torch.maximum(env._tumble_paid, frontier)
+        env._tumble_rate = delta / env.step_dt
+        env._tumble_rate_ema = env._tumble_rate_ema + _TUMBLE_RATE_EMA_ALPHA * (
+            torch.clamp(env._tumble_rate, max=_TUMBLE_RATE_EMA_MAX) - env._tumble_rate_ema
+        )
+        env._tumble_last_update_step = step
+
+
+def reset_tumble_state(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+) -> None:
+    """Re-anchor the tumble paid pointer at reset.
+
+    Must be registered AFTER reset_roulade_state: that event writes the spawn
+    angle into the accumulator (mid-roll spawns start at their pitch), and the
+    paid pointer has to start there so the spawn angle itself is never paid.
+    """
+    if env_ids is None or len(env_ids) == 0:
+        return
+    _tumble_state(env)
+    env_ids = env_ids.to(env.device, dtype=torch.long)
+    env._tumble_paid[env_ids] = env._roulade_max[env_ids]
+    env._tumble_rate[env_ids] = 0.0
+    env._tumble_rate_ema[env_ids] = 0.0
+
+
+def tumble_tuck_score(
+    env: ManagerBasedRlEnv,
+    tuck_overrides: dict,
+    tuck_std: float = 0.7,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """exp(−mean((q − q_tuck)²) / std²) over the tuck joints, in [0, 1].
+
+    ``tuck_overrides`` is keyed by canonical servo index (same table as the
+    roulade mid-roll spawns); indexed through the servo view so it stays
+    correct on backlash models.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    q = _servo_joint_pos(env, asset)
+    idx = list(tuck_overrides.keys())
+    target = torch.tensor(
+        [float(tuck_overrides[i]) for i in idx], device=env.device, dtype=q.dtype
+    )
+    err = torch.nan_to_num(q[:, idx] - target, nan=0.0)
+    return torch.exp(-err.pow(2).mean(dim=-1) / (tuck_std * tuck_std))
+
+
+def tumble_progress(
+    env: ManagerBasedRlEnv,
+    max_paid_rate: float = 15.0,
+    tuck_overrides: Optional[dict] = None,
+    tuck_std: float = 0.7,
+    tuck_bonus: float = 0.4,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Forward-roll rate in revolutions/s, scaled by how curled-up the body is.
+
+    reward = min(frontier rate, max_paid_rate) / 2π × (1 − bonus + bonus × tuck)
+
+    Unlike roulade_progress there is no total cap: every further radian of
+    supported, sagittal forward rotation pays, so the argmax is to keep
+    rolling and to roll fast. Zero when standing still, camping in any pose,
+    rocking, flipping airborne or rolling over a shoulder (accumulator gates).
+    The tuck factor is a MULTIPLIER so a parked tuck earns nothing; a sprawled
+    roll still earns (1 − bonus) of the rate. max_paid_rate only bounds
+    solver spikes — it is far above the natural tumble speed.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_tumble(env, asset)
+    rate = torch.clamp(env._tumble_rate, max=max_paid_rate) / (2.0 * math.pi)
+    if tuck_overrides:
+        tuck = tumble_tuck_score(env, tuck_overrides, tuck_std, asset_cfg)
+        rate = rate * (1.0 - tuck_bonus + tuck_bonus * tuck)
+    return rate
+
+
+def tumble_forward_travel(
+    env: ManagerBasedRlEnv,
+    max_speed: float = 1.0,
+    rate_norm: float = 2.0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Ground speed along the roll direction, paid only while actually rolling.
+
+    The roll direction is the horizontal normal of the body's lateral axis
+    (y_world × z): it equals body-forward when upright and — unlike body x —
+    stays put through any amount of pure pitch. Signed and clamped to
+    ±max_speed so the trunk's back-and-forth swing around the CoM averages
+    out to the true travel. Gated by the EMA of the frontier advance rate:
+    walking, sliding or rocking forward (frontier not advancing) pays zero.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_tumble(env, asset)
+    q = asset.data.root_link_quat_w
+    w, x, y, z = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
+    # Body y axis in world: second column of R(q).
+    y_x = 2.0 * (x * y - w * z)
+    y_y = 1.0 - 2.0 * (x * x + z * z)
+    norm = torch.sqrt(y_x * y_x + y_y * y_y).clamp(min=1e-6)
+    v = asset.data.root_link_lin_vel_w
+    v_fwd = (v[:, 0] * y_y - v[:, 1] * y_x) / norm
+    v_fwd = torch.clamp(torch.nan_to_num(v_fwd, nan=0.0), -max_speed, max_speed)
+    gate = torch.clamp(env._tumble_rate_ema / rate_norm, 0.0, 1.0)
+    return v_fwd * gate

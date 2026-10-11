@@ -278,3 +278,20 @@ for _task_id, _make_cfg, _kw, _rl_cfg, _robot_cfg in _BACKLASH_TASKS:
         rl_cfg=_rl_cfg,
         runner_cls=MicroduckOnPolicyRunner,
     )
+
+
+
+# Tumble — perpetual forward roll: tuck and keep rolling, faster is better
+# (flat only; built on the roulade env, same groundcontact robot model).
+from .microduck_tumble_env_cfg import (
+    make_microduck_tumble_env_cfg,
+    MicroduckTumbleRlCfg,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-Tumble-Flat-MicroDuck",
+    env_cfg=make_microduck_tumble_env_cfg(),
+    play_env_cfg=make_microduck_tumble_env_cfg(play=True),
+    rl_cfg=MicroduckTumbleRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
