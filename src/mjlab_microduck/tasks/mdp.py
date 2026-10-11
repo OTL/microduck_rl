@@ -7669,3 +7669,94 @@ def roulade_lateral_velocity_penalty(
     """Body-frame lateral (y) linear velocity² — keeps the roll straight."""
     asset: Entity = env.scene[asset_cfg.name]
     return torch.nan_to_num(asset.data.root_link_lin_vel_b[:, 1].pow(2), nan=0.0)
+
+
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Jump task (microduck_jump_env_cfg.py)
+# ══════════════════════════════════════════════════════════════════════════════
+# Perpetual "jump as high as possible": the paid quantity is the world z of the
+# TOPMOST body frame (owner's metric: any part of the body, as high as
+# possible), and it is paid ONLY in flight. Both terms share one hard gate
+# stack — whole-robot ground contact (airborne / supported) × trunk upright —
+# so neither a tip-toe stretch nor a tumbling launch collects.
+
+
+def _jump_upright_gate(
+    asset: Entity,
+    tilt_full_deg: float,
+    tilt_zero_deg: float,
+) -> torch.Tensor:
+    """Smoothstep on trunk tilt: 1 below tilt_full_deg, 0 above tilt_zero_deg."""
+    g = torch.nan_to_num(asset.data.projected_gravity_b, nan=0.0)
+    cos_tilt = torch.clamp(-g[:, 2], -1.0, 1.0)
+    c_full = math.cos(math.radians(tilt_full_deg))
+    c_zero = math.cos(math.radians(tilt_zero_deg))
+    t = torch.clamp((cos_tilt - c_zero) / max(c_full - c_zero, 1e-6), 0.0, 1.0)
+    return t * t * (3.0 - 2.0 * t)
+
+
+def jump_top_height(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Height above the floor of the topmost body frame of the robot (m)."""
+    asset: Entity = env.scene[asset_cfg.name]
+    z = torch.nan_to_num(asset.data.body_link_pos_w[:, :, 2], nan=0.0, posinf=0.0, neginf=0.0)
+    return z.max(dim=1).values - env.scene.terrain.env_origins[:, 2]
+
+
+def jump_top_height_airborne(
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    ref_height: float,
+    height_scale: float = 0.02,
+    max_clearance: float = 0.15,
+    hop_bonus: float = 0.2,
+    tilt_full_deg: float = 25.0,
+    tilt_zero_deg: float = 50.0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Pay the topmost-point clearance while AIRBORNE and upright.
+
+    reward = airborne · upright · (hop_bonus + clamp(top_z − ref, 0, max) / scale)
+
+    ``sensor_name`` is the whole-robot ground-contact sensor; airborne = no
+    robot geom touches the terrain, so stretching up on the floor pays zero.
+    Per flight the integral grows ~v³ with take-off speed (higher AND longer),
+    which is the "as high as possible" gradient; the clamp keeps a
+    contact-solver launch from being a jackpot. Missing sensor → zero (never
+    "always airborne").
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    supported = _sensor_any_contact(env, sensor_name)
+    if supported is None:
+        return torch.zeros(env.num_envs, device=env.device)
+    clearance = torch.clamp(jump_top_height(env, asset_cfg) - ref_height, 0.0, max_clearance)
+    gate = (~supported).float() * _jump_upright_gate(asset, tilt_full_deg, tilt_zero_deg)
+    return gate * (hop_bonus + clearance / height_scale)
+
+
+def jump_pushoff_velocity(
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    max_vz: float = 1.5,
+    tilt_full_deg: float = 25.0,
+    tilt_zero_deg: float = 50.0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Capped upward trunk velocity while SUPPORTED and upright (push-off).
+
+    Bootstrap for the take-off: any upward drive against the floor pays at
+    once, long before the first real flight. Supported-only, so the flight
+    itself is paid by ``jump_top_height_airborne`` alone (no double pay), and
+    capped so a solver spike cannot buy more than a hard real push-off.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    supported = _sensor_any_contact(env, sensor_name)
+    if supported is None:
+        return torch.zeros(env.num_envs, device=env.device)
+    vz = torch.nan_to_num(asset.data.root_link_lin_vel_w[:, 2], nan=0.0, posinf=0.0, neginf=0.0)
+    gate = supported.float() * _jump_upright_gate(asset, tilt_full_deg, tilt_zero_deg)
+    return torch.clamp(vz, min=0.0, max=max_vz) * gate
