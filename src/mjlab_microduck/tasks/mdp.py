@@ -7669,3 +7669,132 @@ def roulade_lateral_velocity_penalty(
     """Body-frame lateral (y) linear velocity² — keeps the roll straight."""
     asset: Entity = env.scene[asset_cfg.name]
     return torch.nan_to_num(asset.data.root_link_lin_vel_b[:, 1].pow(2), nan=0.0)
+
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Head sway task — stand still, head_yaw swings widely and slowly left/right
+# forever.
+#
+# Constant-command (perpetual) policy: no phase input, so the reward is
+# phase-free, on the head_yaw phase plane x = q/A, y = -q̇/(A·ω). A sinusoid
+# q = A·cos(ωt) is the unit circle at phase rate +ω (any real motion rotates
+# in +θ in this plane). Static poses have phase rate 0, jitter has a wrong
+# rate — neither pays.
+# ─────────────────────────────────────────────────────────────────────────────
+HEAD_SWAY_AMPLITUDE = 1.0  # rad, peak head_yaw delta from HOME (~57°)
+HEAD_SWAY_PERIOD = 7.0  # s per left-right-left cycle
+
+
+def _head_yaw_state(env: ManagerBasedRlEnv, asset: Entity) -> tuple[torch.Tensor, torch.Tensor]:
+    """head_yaw (delta from HOME, velocity) of the OUTPUT link: on backlash
+    models the passive_head_yaw_backlash play is added, same view as
+    head_pose_tracking and the encoder obs. Identity on plain models."""
+    cache = env.__dict__.setdefault("_head_sway_ids_cache", {})
+    key = id(asset)
+    if key not in cache:
+        ids, _ = asset.find_joints(r"^head_yaw$")
+        name_to_id = {n: i for i, n in enumerate(asset.joint_names)}
+        cache[key] = (ids[0], name_to_id.get("passive_head_yaw_backlash"))
+    jid, bl = cache[key]
+    q = asset.data.joint_pos[:, jid] - asset.data.default_joint_pos[:, jid]
+    qd = asset.data.joint_vel[:, jid]
+    if bl is not None:
+        q = q + asset.data.joint_pos[:, bl]
+        qd = qd + asset.data.joint_vel[:, bl]
+    return torch.nan_to_num(q, nan=0.0), torch.nan_to_num(qd, nan=0.0)
+
+
+def head_sway_track(
+    env: ManagerBasedRlEnv,
+    amplitude: float = HEAD_SWAY_AMPLITUDE,
+    period: float = HEAD_SWAY_PERIOD,
+    radius_std: float = 0.4,
+    rate_std_frac: float = 0.35,
+    rate_tau_s: float = 0.3,
+    amp_std: float = 0.35,
+    amp_floor: float = 0.25,
+    amp_tau_s: float = 3.5,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Reward in [0, 1] for a head_yaw limit cycle of amplitude A and period T.
+
+    on_orbit · on_beat · swing_size, with r, θ the polar coords of
+    (q/A, -q̇/(A·ω)):
+      on_orbit   = exp(-((r-1)/radius_std)²)
+      on_beat    = exp(-((θ̇_ema - ω)/(rate_std_frac·ω))²)
+      swing_size = amp_floor + (1-amp_floor)·exp(-((â-1)/amp_std)²),
+                   â = sqrt(2·EMA(x²)) — the swing envelope in units of A
+                   (a sinusoid of amplitude a has mean q² = a²/2).
+    θ̇ is a wrapped finite difference, clamped to ±4ω (θ is ill-defined near
+    the origin) and smoothed with a ``rate_tau_s`` EMA. swing_size is what
+    stops a small-but-fast ellipse from passing as the orbit; it is floored
+    so a swing that is still small keeps a visible gradient, and it cannot be
+    farmed by a static hold (on_beat is 0 there). Stateful: keeps the previous
+    θ, the rate EMA and the x² EMA on the env; all restart on fresh episodes
+    (so the first steps of an episode pay nothing for a jump-start).
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    q, qd = _head_yaw_state(env, asset)
+    omega = 2.0 * math.pi / period
+    x = q / amplitude
+    y = -qd / (amplitude * omega)
+    radius = torch.sqrt(x * x + y * y)
+    theta = torch.atan2(y, x)
+
+    if not hasattr(env, "_head_sway_theta"):
+        env._head_sway_theta = theta.clone()
+        env._head_sway_rate = torch.zeros_like(theta)
+        env._head_sway_x2 = torch.zeros_like(theta)
+
+    dt = float(env.step_dt)
+    fresh = env.episode_length_buf <= 1
+
+    rate = wrap_to_pi(theta - env._head_sway_theta) / dt
+    rate = torch.clamp(rate, -4.0 * omega, 4.0 * omega)
+    alpha = min(1.0, dt / max(rate_tau_s, 1e-6))
+    ema = (1.0 - alpha) * env._head_sway_rate + alpha * rate
+    env._head_sway_rate = torch.where(fresh, torch.zeros_like(ema), ema)
+    env._head_sway_theta = theta.clone()
+
+    beta = min(1.0, dt / max(amp_tau_s, 1e-6))
+    x2 = (1.0 - beta) * env._head_sway_x2 + beta * torch.clamp(x * x, max=4.0)
+    env._head_sway_x2 = torch.where(fresh, torch.zeros_like(x2), x2)
+    amp_est = torch.sqrt(2.0 * env._head_sway_x2)
+
+    on_orbit = torch.exp(-(((radius - 1.0) / radius_std) ** 2))
+    on_beat = torch.exp(-(((env._head_sway_rate - omega) / (rate_std_frac * omega)) ** 2))
+    swing_size = amp_floor + (1.0 - amp_floor) * torch.exp(-(((amp_est - 1.0) / amp_std) ** 2))
+    return on_orbit * on_beat * swing_size
+
+
+def head_sway_speed(
+    env: ManagerBasedRlEnv,
+    amplitude: float = HEAD_SWAY_AMPLITUDE,
+    period: float = HEAD_SWAY_PERIOD,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Bootstrap in [0, 1]: |q̇| / (A·ω), capped at 1 (faster pays nothing
+    more), and zero outside 1.25·A so it can't be earned by slamming past the
+    target swing. Fade out by curriculum once head_sway_track carries."""
+    asset: Entity = env.scene[asset_cfg.name]
+    q, qd = _head_yaw_state(env, asset)
+    peak = amplitude * 2.0 * math.pi / period
+    in_range = (q.abs() <= 1.25 * amplitude).float()
+    return torch.clamp(qd.abs() / peak, max=1.0) * in_range
+
+
+def head_sway_limit(
+    env: ManagerBasedRlEnv,
+    amplitude: float = HEAD_SWAY_AMPLITUDE,
+    margin: float = 1.2,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Cost ≥ 0 (use with a negative weight): head_yaw excursion beyond
+    ``margin``·A, in rad. qpos-side cap so the wide swing turns around instead
+    of running on toward the mechanical range (stock dof_pos_limits only fires
+    in the last few % of it)."""
+    asset: Entity = env.scene[asset_cfg.name]
+    q, _ = _head_yaw_state(env, asset)
+    return torch.clamp(q.abs() - margin * amplitude, min=0.0)
