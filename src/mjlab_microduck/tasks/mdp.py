@@ -7669,3 +7669,331 @@ def roulade_lateral_velocity_penalty(
     """Body-frame lateral (y) linear velocity² — keeps the roll straight."""
     asset: Entity = env.scene[asset_cfg.name]
     return torch.nan_to_num(asset.data.root_link_lin_vel_b[:, 1].pow(2), nan=0.0)
+
+
+
+
+# ==============================================================================
+# Headstand task — episodic: dive onto the head top, hold, stand back up
+# ==============================================================================
+#
+# Built on the roulade machinery (head-top axis, contact helpers, flatness
+# gate, spawn function). Three state-gated stages, no clock in the obs:
+#   1. ENTRY — rate-limited increments of the max-so-far entry potential
+#      φ = 0.3·forward-pitch + 0.2·head-top contact + 0.5·(head-top contact ×
+#      feet airborne × feet height). Potential-based: camping pays zero.
+#   2. HOLD — quality q = head-top contact × feet airborne × feet height ×
+#      head-only support × stillness, paid per step ONLY until hold_s seconds
+#      of hold time are banked (budgeted annuity: no jackpot, nothing to
+#      farm by staying).
+#   3. STAND — standing rewards and the not-standing tax, gated on the
+#      hold-done latch (banked hold time ≥ hold_s). Standing at spawn earns
+#      nothing; only a completed hold opens the standing annuity.
+#
+# Per-env state on the env object (created lazily, reset by
+# reset_headstand_state):
+#   env._hs_hold_t      — banked hold time (s)
+#   env._hs_hold_t_prev — banked hold time before this step's update
+#   env._hs_phi_max     — max entry potential so far this episode (frontier)
+#   env._hs_phi_paid    — frontier already paid out by headstand_progress
+#   env._hs_q           — this step's hold quality
+
+# Sensor names read by the update (must match the env cfg).
+_HS_HEAD_SENSOR = "head_ground_contact"
+_HS_FEET_SENSOR = "feet_ground_contact"
+_HS_BODY_SENSOR = "body_ground_contact"
+
+# Feet-height factor: lower ankle z (above the env origin) mapped linearly to
+# [0, 1]. Standing puts the ankles well below LO; both feet must come up.
+_HS_FOOT_Z_LO = 0.04
+_HS_FOOT_Z_HI = 0.10
+
+# Hold quality multiplier while the trunk or a leg also rests on the floor —
+# a sloppy (propped) hold still scores a little so the chain is discoverable,
+# a head-only hold scores 4× more.
+_HS_BODY_CONTACT_FACTOR = 0.25
+
+# The hold timer runs while q exceeds this (a face-plant with the knees bent
+# does not qualify: propped × half feet height ≈ 0.1).
+_HS_Q_MIN = 0.15
+
+# Stillness: exp(−|ω_trunk|² / std²).
+_HS_STILL_STD = 2.0
+
+# Forward pitch that earns the full pitch share of the entry potential.
+_HS_PITCH_FULL = math.radians(90.0)
+
+
+def _headstand_state(env: ManagerBasedRlEnv) -> None:
+    if not hasattr(env, "_hs_hold_t"):
+        z = torch.zeros(env.num_envs, device=env.device)
+        env._hs_hold_t = z.clone()
+        env._hs_hold_t_prev = z.clone()
+        env._hs_phi_max = z.clone()
+        env._hs_phi_paid = z.clone()
+        env._hs_q = z.clone()
+        env._hs_last_update_step = -1
+
+
+def _update_headstand(env: ManagerBasedRlEnv, asset: Entity) -> None:
+    """Compute the hold quality / entry potential and advance the hold timer.
+
+    Step-guarded so that multiple reward terms reading the state in the same
+    control step don't double-integrate the timer.
+    """
+    _headstand_state(env)
+    step = int(env.common_step_counter)
+    if step == env._hs_last_update_step:
+        return
+
+    quat = torch.nan_to_num(asset.data.root_link_quat_w, nan=0.0)
+    w, x, y, z = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
+    up = 1.0 - 2.0 * (x * x + y * y)
+    # Forward pitch from projected gravity: atan2(g_b.x, −g_b.z). Standing 0,
+    # face-down +90° (roulade sign convention); backward lean is negative.
+    pitch = torch.atan2(2.0 * (w * y - x * z), up)
+    y_z = _lateral_axis_z(quat).abs()
+    t = torch.clamp((_FLAT_ZERO - y_z) / (_FLAT_ZERO - _FLAT_FULL), 0.0, 1.0)
+    flat = t * t * (3.0 - 2.0 * t)
+    p_pitch = torch.clamp(pitch / _HS_PITCH_FULL, 0.0, 1.0) * flat
+
+    ones = torch.ones(env.num_envs, device=env.device)
+    head = _sensor_any_contact(env, _HS_HEAD_SENSOR)
+    if head is None:
+        top = torch.zeros_like(ones)
+    else:
+        top = (head & _head_top_down(env, asset)).float()
+    feet = _sensor_any_contact(env, _HS_FEET_SENSOR)
+    feet_air = ones if feet is None else (~feet).float()
+    body = _sensor_any_contact(env, _HS_BODY_SENSOR)
+    body_factor = ones if body is None else torch.where(
+        body, _HS_BODY_CONTACT_FACTOR * ones, ones
+    )
+
+    if not hasattr(env, "_hs_foot_body_ids"):
+        ids, _ = asset.find_bodies(r"^ankle_(left|right)$")
+        env._hs_foot_body_ids = ids
+    foot_z = asset.data.body_link_pos_w[:, env._hs_foot_body_ids, 2].min(dim=-1).values
+    foot_z = torch.nan_to_num(foot_z - env.scene.env_origins[:, 2], nan=0.0)
+    feet_up = torch.clamp(
+        (foot_z - _HS_FOOT_Z_LO) / (_HS_FOOT_Z_HI - _HS_FOOT_Z_LO), 0.0, 1.0
+    )
+
+    omega = torch.nan_to_num(asset.data.root_link_ang_vel_b, nan=0.0)
+    still = torch.exp(-omega.pow(2).sum(dim=-1) / (_HS_STILL_STD * _HS_STILL_STD))
+
+    q = top * feet_air * feet_up * body_factor * still
+    phi = 0.3 * p_pitch + 0.2 * top + 0.5 * top * feet_air * feet_up
+
+    env._hs_q = q
+    env._hs_phi_max = torch.maximum(env._hs_phi_max, phi)
+    env._hs_hold_t_prev = env._hs_hold_t.clone()
+    env._hs_hold_t = env._hs_hold_t + env.step_dt * (q > _HS_Q_MIN).float()
+    env._hs_last_update_step = step
+
+
+def _headstand_done(env: ManagerBasedRlEnv, hold_s: float) -> torch.Tensor:
+    """1 where the hold is banked (hold time ≥ hold_s) — the stand-phase gate."""
+    _headstand_state(env)
+    return (env._hs_hold_t >= hold_s).float()
+
+
+def _headstand_upright_and_height(env: ManagerBasedRlEnv, asset: Entity) -> tuple:
+    quat = asset.data.root_link_quat_w
+    up = torch.nan_to_num(1.0 - 2.0 * (quat[:, 1].pow(2) + quat[:, 2].pow(2)), nan=0.0)
+    z = torch.nan_to_num(
+        asset.data.root_link_pos_w[:, 2] - env.scene.terrain.env_origins[:, 2], nan=0.0
+    )
+    return up, z
+
+
+def reset_headstand_state(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    standing_prob: float = 0.3,
+    prehold_prob: float = 0.4,
+    posthold_prob: float = 0.3,
+    hold_s: float = 2.0,
+    standing_tilt_max: float = 0.0,
+    prehold_pitch_range: tuple = (math.radians(70.0), math.radians(130.0)),
+    posthold_pitch_range: tuple = (math.radians(60.0), math.radians(300.0)),
+    spawn_z_range: tuple = (0.05, 0.10),
+    tuck_overrides: Optional[dict] = None,
+    tuck_factor_range: tuple = (0.3, 1.0),
+    joint_noise_std: float = 0.0,
+):
+    """Reset to a standing start, an on-head state, or a post-hold state.
+
+    Reverse curriculum in three buckets (poses written by reset_roulade_state,
+    one call per bucket):
+      • standing  — upright at HOME, nothing banked: the full trick.
+      • pre-hold  — pitched onto the head, tucked, hold timer at 0: practices
+        the balance. The pitch + contact share of the entry potential (0.5)
+        is considered given, so only lifting the feet is still paid.
+      • post-hold — anywhere a dismount can end up, hold already banked:
+        practices the rise (the stand gate is open at birth).
+    """
+    if env_ids is None or len(env_ids) == 0:
+        return
+    env_ids = env_ids.to(env.device, dtype=torch.long)
+    num = len(env_ids)
+    _headstand_state(env)
+
+    total = max(standing_prob + prehold_prob + posthold_prob, 1e-6)
+    u = torch.rand(num, device=env.device)
+    is_pre = u < prehold_prob / total
+    is_post = (~is_pre) & (u < (prehold_prob + posthold_prob) / total)
+    is_stand = ~(is_pre | is_post)
+
+    reset_roulade_state(
+        env,
+        env_ids[is_stand],
+        asset_cfg=asset_cfg,
+        standing_prob=1.0,
+        midroll_prob=0.0,
+        standing_tilt_max=standing_tilt_max,
+    )
+    for mask, pitch_range in ((is_pre, prehold_pitch_range), (is_post, posthold_pitch_range)):
+        reset_roulade_state(
+            env,
+            env_ids[mask],
+            asset_cfg=asset_cfg,
+            standing_prob=0.0,
+            midroll_prob=1.0,
+            midroll_pitch_min=pitch_range[0],
+            midroll_pitch_max=pitch_range[1],
+            midroll_z_min=spawn_z_range[0],
+            midroll_z_max=spawn_z_range[1],
+            midroll_omega_range=(0.0, 0.0),
+            tuck_overrides=tuck_overrides,
+            tuck_factor_range=tuck_factor_range,
+            joint_noise_std=joint_noise_std,
+        )
+
+    hold_t = torch.where(is_post, hold_s, 0.0).to(env._hs_hold_t.dtype)
+    phi = torch.where(is_post, 1.0, torch.where(is_pre, 0.5, 0.0)).to(env._hs_phi_max.dtype)
+    env._hs_hold_t[env_ids] = hold_t
+    env._hs_hold_t_prev[env_ids] = hold_t
+    env._hs_phi_max[env_ids] = phi
+    env._hs_phi_paid[env_ids] = phi
+    env._hs_q[env_ids] = 0.0
+
+
+def headstand_progress(
+    env: ManagerBasedRlEnv,
+    hold_s: float,
+    max_paid_rate: float = 1.0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Pay the entry-potential frontier at a bounded rate (per second).
+
+    The paid pointer slews toward the frontier at max_paid_rate, so a contact
+    flip that jumps the potential pays out over the following steps instead
+    of as a jackpot, and arriving faster earns nothing more. Episode total is
+    exactly the frontier reached (≤ 1). Closed once the hold is banked.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_headstand(env, asset)
+    not_done = (env._hs_hold_t_prev < hold_s).float()
+    pay = torch.clamp(
+        env._hs_phi_max - env._hs_phi_paid, min=0.0, max=max_paid_rate * env.step_dt
+    ) * not_done
+    env._hs_phi_paid = env._hs_phi_paid + pay
+    return pay / env.step_dt
+
+
+def headstand_hold(
+    env: ManagerBasedRlEnv,
+    hold_s: float,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Budgeted hold annuity: hold quality q, paid until hold_s is banked.
+
+    q = head-top contact × feet airborne × feet height × head-only support ×
+    stillness ∈ [0, 1]. Once the banked hold time reaches hold_s the term
+    pays zero for the rest of the episode — staying on the head longer is
+    worth nothing (and is taxed by headstand_not_standing_tax).
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_headstand(env, asset)
+    return env._hs_q * (env._hs_hold_t_prev < hold_s).float()
+
+
+def headstand_stand_composite(
+    env: ManagerBasedRlEnv,
+    hold_s: float,
+    target_height: float,
+    height_std: float,
+    upright_std: float,
+    pose_std: float,
+    joint_indices: list,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """standing_composite_score × hold-done gate — the standing annuity."""
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_headstand(env, asset)
+    score = standing_composite_score(
+        env,
+        target_height=target_height,
+        height_std=height_std,
+        upright_std=upright_std,
+        pose_std=pose_std,
+        joint_indices=joint_indices,
+        asset_cfg=asset_cfg,
+    )
+    return score * _headstand_done(env, hold_s)
+
+
+def headstand_upright_after_hold(
+    env: ManagerBasedRlEnv,
+    hold_s: float,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """(1 + cos tilt) / 2 × hold-done gate — pull toward vertical.
+
+    Linear over the WHOLE tilt range (the trunk is past horizontal on the
+    head, where a clamped cos has no gradient). Every flop keeps part of it,
+    which is why it is always paired with headstand_not_standing_tax.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_headstand(env, asset)
+    up, _ = _headstand_upright_and_height(env, asset)
+    return 0.5 * (1.0 + up) * _headstand_done(env, hold_s)
+
+
+def headstand_stand_sharp(
+    env: ManagerBasedRlEnv,
+    hold_s: float,
+    target_height: float,
+    height_std: float = 0.015,
+    upright_std: float = 0.3,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Tight-std upright × height Gaussians × hold-done gate — the last mile."""
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_headstand(env, asset)
+    up, z = _headstand_upright_and_height(env, asset)
+    upright_g = torch.exp(-(1.0 - up) / (upright_std * upright_std))
+    height_g = torch.exp(-((z - target_height) / height_std) ** 2)
+    return upright_g * height_g * _headstand_done(env, hold_s)
+
+
+def headstand_not_standing_tax(
+    env: ManagerBasedRlEnv,
+    hold_s: float,
+    target_height: float,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """SELF-NEGATING: −(1 − upright × height fraction) once the hold is banked.
+
+    Use a POSITIVE weight. Zero when standing upright at target height, −1
+    while inverted or lying down. Height alone is not enough (the trunk sits
+    high during the headstand itself), hence the product with clamp(cos tilt).
+    Zero before the hold is banked, so the dive and the hold are never taxed.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    _update_headstand(env, asset)
+    up, z = _headstand_upright_and_height(env, asset)
+    standing = torch.clamp(up, 0.0, 1.0) * torch.clamp(z / target_height, 0.0, 1.0)
+    return -(1.0 - standing) * _headstand_done(env, hold_s)
