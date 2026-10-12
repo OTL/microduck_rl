@@ -7669,3 +7669,343 @@ def roulade_lateral_velocity_penalty(
     """Body-frame lateral (y) linear velocity² — keeps the roll straight."""
     asset: Entity = env.scene[asset_cfg.name]
     return torch.nan_to_num(asset.data.root_link_lin_vel_b[:, 1].pow(2), nan=0.0)
+
+
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Jump task (microduck_jump_env_cfg.py)
+# ══════════════════════════════════════════════════════════════════════════════
+# Perpetual "jump as high as possible". Each jump is paid ONCE, on the per-jump
+# PEAK of the foot clearance (lowest mesh point of both feet above the floor),
+# as increments of a frontier that resets on every touch-down — air TIME pays
+# nothing (run 1 paid per airborne step and got foot patter). The frontier
+# only moves while the whole robot is off the terrain and the trunk is
+# upright, and each jump's pay is scaled by the crouch→extension stroke
+# latched at take-off.
+
+
+def _jump_upright_gate(
+    asset: Entity,
+    tilt_full_deg: float,
+    tilt_zero_deg: float,
+) -> torch.Tensor:
+    """Smoothstep on trunk tilt: 1 below tilt_full_deg, 0 above tilt_zero_deg."""
+    g = torch.nan_to_num(asset.data.projected_gravity_b, nan=0.0)
+    cos_tilt = torch.clamp(-g[:, 2], -1.0, 1.0)
+    c_full = math.cos(math.radians(tilt_full_deg))
+    c_zero = math.cos(math.radians(tilt_zero_deg))
+    t = torch.clamp((cos_tilt - c_zero) / max(c_full - c_zero, 1e-6), 0.0, 1.0)
+    return t * t * (3.0 - 2.0 * t)
+
+
+def _jump_body_points(
+    env: ManagerBasedRlEnv,
+    asset: Entity,
+    body_names: tuple,
+    cache_key: str,
+) -> tuple:
+    """Extreme mesh vertices of the named bodies, in each body's frame (cached).
+
+    Returns ``(body_idx, pts)``: ``pts`` (M, 3) body-frame points and
+    ``body_idx`` (M,) the entity-local body index each point belongs to. Per
+    body, all mesh vertices of its geoms are reduced to the support points
+    along a 124-direction grid — enough to read the lowest / highest point of
+    the real geometry to well under a millimetre in any orientation, at a few
+    hundred points instead of whole meshes. Non-mesh geoms contribute their
+    centre; a body without geoms contributes its origin.
+    """
+    cache = env.__dict__.setdefault("_jump_points_cache", {})
+    if cache_key in cache:
+        return cache[cache_key]
+
+    m = env.sim.mj_model
+    names = asset.body_names
+    local_ids = [i for i, n in enumerate(names) if n in tuple(body_names)]
+    if len(local_ids) != len(tuple(body_names)):
+        raise ValueError(f"jump: bodies {body_names} not all found in {names}")
+    global_ids = asset.indexing.body_ids.detach().cpu().numpy()
+
+    r = np.arange(-2, 3, dtype=np.float64)
+    dirs = np.stack(np.meshgrid(r, r, r, indexing="ij"), axis=-1).reshape(-1, 3)
+    dirs = dirs[np.abs(dirs).sum(axis=1) > 0]
+
+    all_idx, all_pts = [], []
+    for local in local_ids:
+        gb = int(global_ids[local])
+        pts = []
+        for g in np.nonzero(m.geom_bodyid == gb)[0]:
+            g_pos = np.asarray(m.geom_pos[g], dtype=np.float64)
+            mesh_id = int(m.geom_dataid[g])
+            if int(m.geom_type[g]) != int(mujoco.mjtGeom.mjGEOM_MESH) or mesh_id < 0:
+                pts.append(g_pos[None, :])
+                continue
+            adr = int(m.mesh_vertadr[mesh_id])
+            num = int(m.mesh_vertnum[mesh_id])
+            verts = np.asarray(m.mesh_vert[adr:adr + num], dtype=np.float64)
+            rot = np.zeros(9, dtype=np.float64)
+            mujoco.mju_quat2Mat(rot, np.asarray(m.geom_quat[g], dtype=np.float64))
+            pts.append(g_pos[None, :] + verts @ rot.reshape(3, 3).T)
+        p = np.concatenate(pts, axis=0) if pts else np.zeros((1, 3), dtype=np.float64)
+        keep = np.unique(np.argmax(p @ dirs.T, axis=0))
+        all_pts.append(p[keep])
+        all_idx.append(np.full(len(keep), local, dtype=np.int64))
+
+    out = (
+        torch.as_tensor(np.concatenate(all_idx), dtype=torch.long, device=env.device),
+        torch.as_tensor(np.concatenate(all_pts), dtype=torch.float32, device=env.device),
+    )
+    cache[cache_key] = out
+    return out
+
+
+def _jump_points_z(
+    env: ManagerBasedRlEnv,
+    asset: Entity,
+    body_names: tuple,
+    cache_key: str,
+) -> torch.Tensor:
+    """World z of every cached extreme point of the named bodies. (N, M)."""
+    body_idx, pts = _jump_body_points(env, asset, body_names, cache_key)
+    pose = asset.data.body_link_pose_w[:, body_idx]
+    w, x, y, z = pose[..., 3], pose[..., 4], pose[..., 5], pose[..., 6]
+    # z-row of R(q): world z of a body-frame point is pos_z + row · p.
+    z_w = (
+        pose[..., 2]
+        + 2.0 * (x * z - w * y) * pts[:, 0]
+        + 2.0 * (y * z + w * x) * pts[:, 1]
+        + (1.0 - 2.0 * (x * x + y * y)) * pts[:, 2]
+    )
+    return torch.nan_to_num(z_w, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def jump_feet_lowest_height(
+    env: ManagerBasedRlEnv,
+    foot_body_names: tuple = ("ankle_left", "ankle_right"),
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Height above the floor of the lowest point of BOTH feet (m)."""
+    asset: Entity = env.scene[asset_cfg.name]
+    z = _jump_points_z(env, asset, foot_body_names, "feet")
+    return z.min(dim=1).values - env.scene.env_origins[:, 2]
+
+
+def jump_top_height(
+    env: ManagerBasedRlEnv,
+    top_body_names: tuple = ("trunk_base", "neck", "neck_pitch", "yaw_roll_motion", "jaw_soft"),
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Height above the floor of the topmost mesh point of the robot (m)."""
+    asset: Entity = env.scene[asset_cfg.name]
+    z = _jump_points_z(env, asset, top_body_names, "top")
+    return z.max(dim=1).values - env.scene.env_origins[:, 2]
+
+
+def _jump_state(env: ManagerBasedRlEnv) -> dict:
+    if not hasattr(env, "_jump_state"):
+        z = torch.zeros(env.num_envs, device=env.device)
+        b = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        env._jump_state = {
+            "step": -1,
+            "airborne": b.clone(),       # previous step was in flight
+            "armed": b.clone(),          # touched the floor since reset
+            "min_z": z.clone() + 1.0e3,  # lowest supported trunk z since landing
+            "factor": z.clone(),         # crouch→extension factor of this jump
+            "foot_peak": z.clone(),      # per-jump frontier (m, dead-banded)
+            "foot_prev": z.clone(),
+            "top_peak": z.clone(),
+            "top_prev": z.clone(),
+            "gate": z.clone(),           # airborne · armed · upright · factor
+        }
+    return env._jump_state
+
+
+def reset_jump_state(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+) -> None:
+    """Clear the per-jump frontier / crouch latch of the reset envs."""
+    if env_ids is None or len(env_ids) == 0:
+        return
+    st = _jump_state(env)
+    env_ids = env_ids.to(env.device, dtype=torch.long)
+    st["airborne"][env_ids] = False
+    st["armed"][env_ids] = False
+    st["min_z"][env_ids] = 1.0e3
+    for key in ("factor", "foot_peak", "foot_prev", "top_peak", "top_prev", "gate"):
+        st[key][env_ids] = 0.0
+
+
+def _update_jump_state(
+    env: ManagerBasedRlEnv,
+    asset: Entity,
+    sensor_name: str,
+    foot_deadband: float,
+    max_clearance: float,
+    top_ref_height: float,
+    top_per_foot: float,
+    stroke_full: float,
+    stroke_base: float,
+    tilt_full_deg: float,
+    tilt_zero_deg: float,
+    foot_body_names: tuple,
+    top_body_names: tuple,
+) -> dict:
+    """Advance the per-jump state machine once per control step.
+
+    Step-guarded so both peak terms can call it. A JUMP is the span between a
+    take-off and the next touch-down of the whole robot (``sensor_name`` = the
+    whole-robot ground-contact sensor). During it the frontiers only move up;
+    on touch-down they reset to zero, so each jump is paid for its own peak
+    and hovering / falling pays nothing. Missing sensor → always supported
+    (nothing is ever paid), never "always airborne".
+
+    Crouch latch: while supported the lowest trunk height since the last
+    landing is tracked; at take-off the rise from it (the extension stroke)
+    is turned into this jump's pay factor.
+    """
+    st = _jump_state(env)
+    step = int(env.common_step_counter)
+    if step == st["step"]:
+        return st
+    st["step"] = step
+
+    supported = _sensor_any_contact(env, sensor_name)
+    if supported is None:
+        supported = torch.ones(env.num_envs, dtype=torch.bool, device=env.device)
+    airborne = ~supported
+    takeoff = airborne & ~st["airborne"]
+    touchdown = supported & st["airborne"]
+
+    origin_z = env.scene.env_origins[:, 2]
+    trunk_z = torch.nan_to_num(asset.data.root_link_pos_w[:, 2], nan=0.0) - origin_z
+
+    stroke = torch.clamp(trunk_z - st["min_z"], 0.0, stroke_full) / max(stroke_full, 1e-6)
+    st["factor"] = torch.where(
+        takeoff, stroke_base + (1.0 - stroke_base) * stroke, st["factor"]
+    )
+    st["min_z"] = torch.where(
+        touchdown,
+        trunk_z,
+        torch.where(supported, torch.minimum(st["min_z"], trunk_z), st["min_z"]),
+    )
+    st["armed"] = st["armed"] | supported
+
+    foot_low = _jump_points_z(env, asset, foot_body_names, "feet").min(dim=1).values - origin_z
+    top = _jump_points_z(env, asset, top_body_names, "top").max(dim=1).values - origin_z
+    foot_clear = torch.clamp(foot_low - foot_deadband, 0.0, max_clearance)
+    top_clear = torch.clamp(
+        torch.minimum(top - top_ref_height, top_per_foot * foot_clear), 0.0, max_clearance
+    )
+
+    zero = torch.zeros_like(foot_clear)
+    st["foot_prev"] = torch.where(airborne, st["foot_peak"], zero)
+    st["top_prev"] = torch.where(airborne, st["top_peak"], zero)
+    st["foot_peak"] = torch.where(airborne, torch.maximum(st["foot_prev"], foot_clear), zero)
+    st["top_peak"] = torch.where(airborne, torch.maximum(st["top_prev"], top_clear), zero)
+
+    st["gate"] = (
+        (airborne & st["armed"]).float()
+        * _jump_upright_gate(asset, tilt_full_deg, tilt_zero_deg)
+        * st["factor"]
+    )
+    st["airborne"] = airborne
+    return st
+
+
+def jump_foot_clearance_peak(
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    height_scale: float = 0.01,
+    foot_deadband: float = 0.002,
+    max_clearance: float = 0.08,
+    top_ref_height: float = 0.236,
+    top_per_foot: float = 2.0,
+    stroke_full: float = 0.04,
+    stroke_base: float = 0.4,
+    tilt_full_deg: float = 25.0,
+    tilt_zero_deg: float = 50.0,
+    foot_body_names: tuple = ("ankle_left", "ankle_right"),
+    top_body_names: tuple = ("trunk_base", "neck", "neck_pitch", "yaw_roll_motion", "jaw_soft"),
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Pay each jump for the PEAK height of the lowest point of both feet.
+
+    Per step: gate · Δ(x + x²) / step_dt with x = per-jump frontier of
+    clamp(lowest_foot_z − deadband, 0, max) / height_scale. Summed over a
+    jump this is stroke_factor · (x_peak + x_peak²) — a function of how high
+    the jump went, not of how long it lasted. The lowest point of BOTH feet
+    is measured, so lifting one foot (stepping) is worth nothing; the convex
+    score makes one high jump beat any number of small hops.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    st = _update_jump_state(
+        env, asset, sensor_name, foot_deadband, max_clearance, top_ref_height,
+        top_per_foot, stroke_full, stroke_base, tilt_full_deg, tilt_zero_deg,
+        foot_body_names, top_body_names,
+    )
+    x_new = st["foot_peak"] / height_scale
+    x_old = st["foot_prev"] / height_scale
+    delta = (x_new + x_new * x_new) - (x_old + x_old * x_old)
+    return st["gate"] * torch.clamp(delta, min=0.0) / env.step_dt
+
+
+def jump_top_clearance_peak(
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    height_scale: float = 0.01,
+    foot_deadband: float = 0.002,
+    max_clearance: float = 0.08,
+    top_ref_height: float = 0.236,
+    top_per_foot: float = 2.0,
+    stroke_full: float = 0.04,
+    stroke_base: float = 0.4,
+    tilt_full_deg: float = 25.0,
+    tilt_zero_deg: float = 50.0,
+    foot_body_names: tuple = ("ankle_left", "ankle_right"),
+    top_body_names: tuple = ("trunk_base", "neck", "neck_pitch", "yaw_roll_motion", "jaw_soft"),
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Pay each jump for the PEAK rise of the topmost point above standing.
+
+    Same per-jump frontier as ``jump_foot_clearance_peak``, on
+    min(top_z − top_ref_height, top_per_foot · foot_clearance): the owner's
+    "highest point of any body part" metric against the measured standing top,
+    capped by the foot clearance so that stretching the neck during a
+    micro-hop is not a jump. Linear in the rise.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    st = _update_jump_state(
+        env, asset, sensor_name, foot_deadband, max_clearance, top_ref_height,
+        top_per_foot, stroke_full, stroke_base, tilt_full_deg, tilt_zero_deg,
+        foot_body_names, top_body_names,
+    )
+    delta = (st["top_peak"] - st["top_prev"]) / height_scale
+    return st["gate"] * torch.clamp(delta, min=0.0) / env.step_dt
+
+
+def jump_pushoff_power(
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    v_ref: float = 0.5,
+    max_vz: float = 1.0,
+    tilt_full_deg: float = 25.0,
+    tilt_zero_deg: float = 50.0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Squared upward trunk speed while SUPPORTED and upright (push-off).
+
+    (clamp(v_z, 0, max_vz) / v_ref)² — proportional to the ballistic height
+    the current extension would give. Quadratic on purpose: a single fast
+    extension out of a deep crouch pays far more than any amount of slow
+    bobbing. Supported-only (the flight is paid by the peak terms alone) and
+    capped so a solver spike cannot buy more than a hard real push-off.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    supported = _sensor_any_contact(env, sensor_name)
+    if supported is None:
+        return torch.zeros(env.num_envs, device=env.device)
+    vz = torch.nan_to_num(asset.data.root_link_lin_vel_w[:, 2], nan=0.0, posinf=0.0, neginf=0.0)
+    v = torch.clamp(vz, min=0.0, max=max_vz) / max(v_ref, 1e-6)
+    gate = supported.float() * _jump_upright_gate(asset, tilt_full_deg, tilt_zero_deg)
+    return v * v * gate
