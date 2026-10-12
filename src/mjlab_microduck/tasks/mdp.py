@@ -7669,3 +7669,557 @@ def roulade_lateral_velocity_penalty(
     """Body-frame lateral (y) linear velocity² — keeps the roll straight."""
     asset: Entity = env.scene[asset_cfg.name]
     return torch.nan_to_num(asset.data.root_link_lin_vel_b[:, 1].pow(2), nan=0.0)
+
+
+
+
+# ==============================================================================
+# Headstand task — perpetual: mount the flat head top from standing, lift both
+# feet, stay balanced on the head alone
+# ==============================================================================
+#
+# Goal state = jaw_soft (the head) touches the floor, NO other body does, and
+# the head-top axis (_HEAD_TOP_AXIS, roulade's measurement) points down.
+#   • headstand_hold     — the only per-step annuity, hard-gated on that state.
+#   • headstand_progress — potential-based shaping toward it (Δ of a slewed
+#                          potential): unfarmable, charges falling off.
+#   • headstand_lost     — termination: a latched headstand lost for grace_s.
+#   • reset_headstand_state — standing start or statically balanced on-head
+#                          start, from a table computed off the compiled model.
+#
+# Per-env state on the env object (created lazily, reset by
+# reset_headstand_state):
+#   env._headstand_hold_s  — time continuously in the goal state
+#   env._headstand_latch   — True once held >= _HEADSTAND_LATCH_S (or spawned on the head)
+#   env._headstand_lost_s  — time continuously out of the goal state after the latch
+#   env._headstand_phi     — slewed potential tracked by headstand_progress
+
+# Sensor names read by the measurement (must match the env cfg).
+_HEADSTAND_HEAD_SENSOR = "head_ground_contact"
+_HEADSTAND_OTHER_SENSOR = "other_ground_contact"
+
+# Goal-state tilt gate: head top within 60° of straight down. Deliberately wide
+# — the hold reward's Gaussian prices the tilt; this only rejects resting on
+# the face or the side of the shell.
+_HEADSTAND_TOP_COS_MIN = 0.5
+# Continuous time in the goal state before it counts as established.
+_HEADSTAND_LATCH_S = 0.3
+# Potential slew (1/s, symmetric): a full mount takes >= 1 s to be paid, so a
+# violent mount collects nothing a controlled one doesn't, and single-step
+# contact-force noise is filtered instead of paid.
+_HEADSTAND_PHI_RATE = 1.0
+# Load-share denominator floor (N): airborne (0 N / 0 N) reads 0, not NaN.
+_HEADSTAND_FORCE_EPS = 0.2
+# Potential contact/load gate on the head-top alignment (smoothstep): loading
+# the BEAK or the face (ground-pick posture) is not progress.
+_HEADSTAND_GATE_LO = 0.2
+_HEADSTAND_GATE_HI = 0.8
+
+
+def _headstand_quat_mul(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    aw, ax, ay, az = a.unbind(-1)
+    bw, bx, by, bz = b.unbind(-1)
+    return torch.stack(
+        [
+            aw * bw - ax * bx - ay * by - az * bz,
+            aw * bx + ax * bw + ay * bz - az * by,
+            aw * by - ax * bz + ay * bw + az * bx,
+            aw * bz + ax * by - ay * bx + az * bw,
+        ],
+        dim=-1,
+    )
+
+
+def headstand_spawn_table(
+    model: "mujoco.MjModel",
+    joint_names,
+    home,
+    leg_overrides: Optional[dict] = None,
+    prefix: str = "",
+    root_body: str = "trunk_base",
+    head_body: str = "jaw_soft",
+    top_axis: tuple = _HEAD_TOP_AXIS,
+    neck_joints: tuple = ("neck_pitch", "head_pitch"),
+    neck_grid: int = 13,
+    tuck_factors: tuple = (0.0, 0.5, 1.0),
+    limit_factor: float = 0.9,
+    min_clearance: float = 0.012,
+    max_com_offset: float = 0.015,
+    keep: int = 24,
+    floor_mask: int = 1,
+) -> dict:
+    """Statically balanced on-head configurations, from the compiled model (CPU).
+
+    The AGENTS.md "verify physics before training" step done in code, because a
+    hand-written headstand pose cannot be trusted across model revisions: grid
+    over (neck_pitch, head_pitch) × leg tuck factor, forward kinematics for
+    each, and keep the configurations where — with the head-top axis pointing
+    straight down —
+      • every non-head collision geom clears the floor by ``min_clearance``, and
+      • the whole-robot CoM sits within ``max_com_offset`` (horizontal) of the
+        centre of the head-top contact patch.
+    Fallbacks keep the table non-empty (best CoM offset, then best clearance);
+    ``n_balanced`` reports how many entries truly met both criteria.
+
+    ``joint_names`` / ``home`` are the 14 servos in canonical order;
+    ``leg_overrides`` is servo-index keyed. ``prefix`` is the entity prefix in
+    a scene model ("robot/"), "" for a robot-only model. Everything returned is
+    in the TRUNK frame with the trunk at the origin: ``quat`` rotates the trunk
+    so the head top faces down, ``head_rot`` / ``head_pos`` / ``head_verts``
+    let the caller place the lowest head point on the floor for any small
+    extra tilt.
+    """
+
+    def _id(objtype, name):
+        i = mujoco.mj_name2id(model, objtype, prefix + name)
+        if i < 0:
+            raise ValueError(f"headstand_spawn_table: '{prefix + name}' not found in the model")
+        return i
+
+    joint_names = list(joint_names)
+    home = np.asarray(home, dtype=np.float64).reshape(-1)
+    assert len(home) == len(joint_names)
+    root = _id(mujoco.mjtObj.mjOBJ_BODY, root_body)
+    head = _id(mujoco.mjtObj.mjOBJ_BODY, head_body)
+    jids = np.array([_id(mujoco.mjtObj.mjOBJ_JOINT, n) for n in joint_names], dtype=np.int64)
+    qadr = np.asarray(model.jnt_qposadr[jids], dtype=np.int64)
+    free_j = int(model.body_jntadr[root])
+    if free_j < 0 or model.jnt_type[free_j] != mujoco.mjtJoint.mjJNT_FREE:
+        raise ValueError("headstand_spawn_table: root body has no free joint")
+    fq = int(model.jnt_qposadr[free_j])
+    fv = int(model.jnt_dofadr[free_j])
+
+    mid = 0.5 * (model.jnt_range[jids, 0] + model.jnt_range[jids, 1])
+    half = 0.5 * (model.jnt_range[jids, 1] - model.jnt_range[jids, 0]) * limit_factor
+    lo, hi = mid - half, mid + half
+    i_neck, i_head = (joint_names.index(n) for n in neck_joints)
+    leg_mask = np.array(
+        [not any(k in n for k in ("neck_pitch", "head_pitch", "head_yaw", "head_roll")) for n in joint_names]
+    )
+
+    data = mujoco.MjData(model)
+
+    def _fk(q):
+        data.qpos[:] = model.qpos0
+        data.qpos[fq:fq + 3] = 0.0
+        data.qpos[fq + 3:fq + 7] = (1.0, 0.0, 0.0, 0.0)
+        data.qpos[qadr] = q
+        mujoco.mj_kinematics(model, data)
+        mujoco.mj_comPos(model, data)
+
+    def _local_points(g):
+        # Mesh vertices in the geom frame; other geom types fall back to the
+        # centre + bounding radius (conservative).
+        if model.geom_type[g] == mujoco.mjtGeom.mjGEOM_MESH and model.geom_dataid[g] >= 0:
+            m = int(model.geom_dataid[g])
+            adr, num = int(model.mesh_vertadr[m]), int(model.mesh_vertnum[m])
+            return np.array(model.mesh_vert[adr:adr + num], dtype=np.float64), 0.0
+        return np.zeros((1, 3)), float(model.geom_rbound[g])
+
+    def _world_points(g, pts):
+        return data.geom_xpos[g] + pts @ data.geom_xmat[g].reshape(3, 3).T
+
+    root_tree = model.body_rootid[root]
+    head_geoms, other_geoms = [], []
+    for g in range(model.ngeom):
+        b = model.geom_bodyid[g]
+        if model.body_rootid[b] != root_tree:
+            continue
+        if not ((model.geom_contype[g] & floor_mask) or (model.geom_conaffinity[g] & floor_mask)):
+            continue
+        pts, pad = _local_points(g)
+        if b == head:
+            head_geoms.append((g, pts, pad))
+        else:
+            # Clearance is a cm-level check: a vertex subsample is plenty.
+            other_geoms.append((g, pts[:: max(1, len(pts) // 400)], pad))
+    if not head_geoms:
+        raise ValueError("headstand_spawn_table: the head body has no floor-colliding geom")
+
+    # Head geometry is constant in the head frame: support height along the
+    # top axis and the centre of the top contact patch, computed once.
+    a_loc = np.asarray(top_axis, dtype=np.float64)
+    a_loc = a_loc / np.linalg.norm(a_loc)
+    _fk(home)
+    rot_h = data.xmat[head].reshape(3, 3).copy()
+    pos_h = data.xpos[head].copy()
+    head_pts = np.concatenate([(_world_points(g, pts) - pos_h) @ rot_h for g, pts, _ in head_geoms])
+    along = head_pts @ a_loc
+    h_loc = float(along.max())
+    c_loc = head_pts[along >= h_loc - 0.002].mean(axis=0)
+    near_top = head_pts[along >= h_loc - 0.02]
+    head_verts = near_top[:: max(1, len(near_top) // 4000)]
+
+    rows = []
+    for u in tuck_factors:
+        q = home.copy()
+        for idx, ang in (leg_overrides or {}).items():
+            q[idx] = np.clip(home[idx] + u * (ang - home[idx]), lo[idx], hi[idx])
+        for a1 in np.linspace(lo[i_neck], hi[i_neck], neck_grid):
+            for a2 in np.linspace(lo[i_head], hi[i_head], neck_grid):
+                q[i_neck], q[i_head] = a1, a2
+                _fk(q)
+                rot = data.xmat[head].reshape(3, 3).copy()
+                pos = data.xpos[head].copy()
+                a = rot @ a_loc  # head-top axis in the trunk frame = "down" once mounted
+                s_top = float(a @ pos) + h_loc
+                other_max = max(
+                    (float((_world_points(g, pts) @ a).max()) + pad for g, pts, pad in other_geoms),
+                    default=-np.inf,
+                )
+                r = data.subtree_com[root] - (pos + rot @ c_loc)
+                offset = float(np.linalg.norm(r - a * (a @ r)))
+                rows.append((q.copy(), a, rot, pos, offset, s_top - other_max))
+
+    offsets = np.array([r[4] for r in rows])
+    clear = np.array([r[5] for r in rows])
+    order = np.argsort(offsets)
+    balanced = [i for i in order if clear[i] >= min_clearance and offsets[i] <= max_com_offset]
+    pick = balanced[:keep]
+    if len(pick) < 4:
+        pick = [i for i in order if clear[i] >= min_clearance][:4]
+    if not pick:
+        pick = list(np.argsort(-clear)[:4])
+
+    quats = []
+    for i in pick:
+        a = rows[i][1]
+        # Shortest rotation taking a to (0, 0, -1); a ≈ +z (head top up in the
+        # trunk frame) is the degenerate case → half turn about y.
+        qd = np.array([1.0 - a[2], -a[1], a[0], 0.0])
+        n = np.linalg.norm(qd)
+        quats.append(qd / n if n > 1e-6 else np.array([0.0, 0.0, 1.0, 0.0]))
+
+    return {
+        "joints": np.stack([rows[i][0] for i in pick]),
+        "quat": np.stack(quats),
+        "head_rot": np.stack([rows[i][2] for i in pick]),
+        "head_pos": np.stack([rows[i][3] for i in pick]),
+        "com_offset": offsets[pick],
+        "clearance": clear[pick],
+        "head_verts": head_verts,
+        "top_axis": a_loc,
+        "lo": lo,
+        "hi": hi,
+        "leg_mask": leg_mask,
+        "qadr": qadr,
+        "free_qadr": fq,
+        "free_vadr": fv,
+        "n_balanced": len(balanced),
+    }
+
+
+def _headstand_spawn_cache(
+    env: ManagerBasedRlEnv, asset: Entity, entity_name: str, leg_overrides: Optional[dict]
+) -> dict:
+    """Spawn table as device tensors, computed once on the first reset."""
+    cache = getattr(env, "_headstand_spawn", None)
+    if cache is not None:
+        return cache
+    servo_ids = _servo_joint_ids(env, asset)
+    names = [asset.joint_names[i] for i in servo_ids]
+    home = asset.data.default_joint_pos[0, servo_ids].detach().cpu().numpy()
+    model = env.sim.mj_model
+    prefix = f"{entity_name}/"
+    if mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, prefix + "trunk_base") < 0:
+        prefix = ""
+    tab = headstand_spawn_table(model, names, home, leg_overrides, prefix=prefix)
+
+    def _f(x):
+        return torch.as_tensor(np.asarray(x), dtype=torch.float32, device=env.device)
+
+    cache = {k: _f(tab[k]) for k in ("joints", "quat", "head_rot", "head_pos", "head_verts", "lo", "hi")}
+    cache["leg_cols"] = torch.as_tensor(np.nonzero(tab["leg_mask"])[0], dtype=torch.long, device=env.device)
+    cache["qadr"] = torch.as_tensor(tab["qadr"], dtype=torch.long, device=env.device)
+    cache["free_qadr"] = tab["free_qadr"]
+    cache["free_vadr"] = tab["free_vadr"]
+    env._headstand_spawn = cache
+    print(
+        f"[mdp] headstand spawn table: {len(tab['joints'])} entries, "
+        f"{tab['n_balanced']} statically balanced "
+        f"(CoM offset {tab['com_offset'].min() * 1e3:.1f}–{tab['com_offset'].max() * 1e3:.1f} mm, "
+        f"min clearance {tab['clearance'].min() * 1e3:.1f} mm)"
+    )
+    return cache
+
+
+def _headstand_sensor(env: ManagerBasedRlEnv, name: str) -> tuple:
+    """(any contact [B] bool, summed force magnitude [B]) of a ground sensor."""
+    n = env.num_envs
+    if name not in env.scene.sensors:
+        z = torch.zeros(n, device=env.device)
+        return z.bool(), z
+    data = env.scene.sensors[name].data
+    contact = (torch.nan_to_num(data.found.reshape(n, -1), nan=0.0) > 0).any(dim=-1)
+    force = torch.nan_to_num(data.force.reshape(n, -1, 3), nan=0.0, posinf=0.0, neginf=0.0)
+    return contact, force.norm(dim=-1).sum(dim=-1)
+
+
+def _headstand_measure(env: ManagerBasedRlEnv, asset: Entity) -> tuple:
+    """Instantaneous task quantities — pure, no per-env state touched.
+
+    Returns (top_cos, head_contact, other_contact, load):
+      top_cos       1 = head top squarely down, -1 = up (standing)
+      head_contact  jaw_soft touches the floor
+      other_contact any OTHER robot body touches the floor
+      load          share of the ground reaction carried by the head, in [0, 1]
+    """
+    if not hasattr(env, "_headstand_head_body_id"):
+        ids, _ = asset.find_bodies("jaw_soft")
+        env._headstand_head_body_id = ids[0]
+    q = asset.data.body_link_quat_w[:, env._headstand_head_body_id]
+    w, x, y, z = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
+    a, b, c = _HEAD_TOP_AXIS
+    # z-component of R(q) @ axis_local (same expression as _head_top_down)
+    axis_world_z = (
+        2.0 * (x * z - w * y) * a + 2.0 * (y * z + w * x) * b + (1.0 - 2.0 * (x * x + y * y)) * c
+    )
+    top_cos = torch.clamp(torch.nan_to_num(-axis_world_z, nan=-1.0), -1.0, 1.0)
+    head_contact, f_head = _headstand_sensor(env, _HEADSTAND_HEAD_SENSOR)
+    other_contact, f_other = _headstand_sensor(env, _HEADSTAND_OTHER_SENSOR)
+    load = f_head / (f_head + f_other + _HEADSTAND_FORCE_EPS)
+    return top_cos, head_contact, other_contact, load
+
+
+def headstand_potential(
+    top_cos: torch.Tensor, head_contact: torch.Tensor, load: torch.Tensor
+) -> torch.Tensor:
+    """Mount potential in [0, 1]: 0 standing, 1 full weight on the head top.
+
+    0.3 · head top turned toward the floor (linear over the whole 180°, so the
+    first bow already has a gradient)
+    + 0.2 · head top touching
+    + 0.5 · share of the ground load on the head — the continuous path from a
+      head+feet tripod (≈0.5 share) to feet off (share 1).
+    The last two are gated on the top actually facing down.
+    """
+    d_lin = 0.5 * (1.0 + top_cos)
+    t = torch.clamp(
+        (top_cos - _HEADSTAND_GATE_LO) / (_HEADSTAND_GATE_HI - _HEADSTAND_GATE_LO), 0.0, 1.0
+    )
+    gate = t * t * (3.0 - 2.0 * t)
+    return 0.3 * d_lin + 0.2 * gate * head_contact.float() + 0.5 * gate * load
+
+
+def _headstand_state(env: ManagerBasedRlEnv) -> None:
+    if not hasattr(env, "_headstand_hold_s"):
+        z = torch.zeros(env.num_envs, device=env.device)
+        env._headstand_hold_s = z.clone()
+        env._headstand_lost_s = z.clone()
+        env._headstand_phi = z.clone()
+        env._headstand_phi_delta = z.clone()
+        env._headstand_latch = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        env._headstand_cache = None
+        env._headstand_last_step = -1
+
+
+def _headstand_update(env: ManagerBasedRlEnv, asset: Entity) -> tuple:
+    """Advance the per-env headstand state once per control step.
+
+    Step-guarded (the termination and both rewards read it in the same step).
+    Returns (top_cos, only_head, good) for this step.
+    """
+    _headstand_state(env)
+    step = int(env.common_step_counter)
+    if step == env._headstand_last_step and env._headstand_cache is not None:
+        return env._headstand_cache
+    top_cos, head_contact, other_contact, load = _headstand_measure(env, asset)
+    only_head = head_contact & ~other_contact
+    good = only_head & (top_cos > _HEADSTAND_TOP_COS_MIN)
+    dt = env.step_dt
+
+    hold = env._headstand_hold_s
+    env._headstand_hold_s = torch.where(good, hold + dt, torch.zeros_like(hold))
+    env._headstand_latch = env._headstand_latch | (env._headstand_hold_s >= _HEADSTAND_LATCH_S)
+    lost = env._headstand_lost_s
+    env._headstand_lost_s = torch.where(
+        env._headstand_latch & ~good, lost + dt, torch.zeros_like(lost)
+    )
+
+    phi = headstand_potential(top_cos, head_contact, load)
+    max_delta = _HEADSTAND_PHI_RATE * dt
+    delta = torch.clamp(phi - env._headstand_phi, -max_delta, max_delta)
+    env._headstand_phi = env._headstand_phi + delta
+    env._headstand_phi_delta = delta
+
+    env._headstand_cache = (top_cos, only_head, good)
+    env._headstand_last_step = step
+    return env._headstand_cache
+
+
+def reset_headstand_state(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    standing_prob: float = 0.3,
+    headstand_prob: float = 0.7,
+    standing_z_range: tuple = (0.116, 0.124),
+    standing_tilt_max: float = 0.0,
+    headstand_tilt_max: float = 0.0,
+    headstand_drop_range: tuple = (0.002, 0.006),
+    headstand_ang_vel_max: float = 0.0,
+    leg_joint_noise_std: float = 0.0,
+    leg_overrides: Optional[dict] = None,
+):
+    """Reset to a standing start or to a balanced on-head start.
+
+    Standing bucket: HOME joints (left from reset_robot_joints), random yaw,
+    ±standing_tilt_max, z in standing_z_range.
+
+    On-head bucket (reverse curriculum — the hold gets on-policy data from
+    iteration 0): a random entry of headstand_spawn_table, random yaw, a tilt
+    of up to headstand_tilt_max about a random horizontal axis, leg-joint
+    noise (neck joints stay exact: they set where the head is), and the trunk
+    height solved so the lowest head vertex starts headstand_drop_range above
+    the floor. Optional trunk roll/pitch rate up to headstand_ang_vel_max.
+
+    Headstand bookkeeping: on-head spawns are born latched with the potential
+    at 1 (falling off is charged, holding is free); standing spawns start at 0.
+    """
+    if env_ids is None or len(env_ids) == 0:
+        return
+    env_ids = env_ids.to(env.device, dtype=torch.long)
+    num = len(env_ids)
+    dev = env.device
+    asset: Entity = env.scene[asset_cfg.name]
+    tab = _headstand_spawn_cache(env, asset, asset_cfg.name, leg_overrides)
+    _headstand_state(env)
+
+    total = standing_prob + headstand_prob
+    is_head = torch.rand(num, device=dev) < (headstand_prob / max(total, 1e-6))
+
+    yaw = torch.rand(num, device=dev) * 2 * np.pi - np.pi
+    zeros = torch.zeros(num, device=dev)
+    q_yaw = torch.stack([torch.cos(yaw * 0.5), zeros, zeros, torch.sin(yaw * 0.5)], dim=1)
+
+    tilt_max = torch.where(
+        is_head, torch.full_like(zeros, headstand_tilt_max), torch.full_like(zeros, standing_tilt_max)
+    )
+    tilt = torch.rand(num, device=dev) * tilt_max
+    tilt_dir = torch.rand(num, device=dev) * 2 * np.pi
+    q_tilt = quat_from_angle_axis(
+        tilt, torch.stack([torch.cos(tilt_dir), torch.sin(tilt_dir), zeros], dim=1)
+    )
+
+    k = torch.randint(0, tab["joints"].shape[0], (num,), device=dev)
+    ident = torch.tensor([1.0, 0.0, 0.0, 0.0], device=dev).expand(num, 4)
+    q_pre = _headstand_quat_mul(q_tilt, torch.where(is_head.unsqueeze(1), tab["quat"][k], ident))
+    quat = _headstand_quat_mul(q_yaw, q_pre)
+
+    # Trunk height that puts the lowest head vertex on the floor: world-down
+    # expressed in the trunk frame, then in the head frame, then the head's
+    # support along it. (Yaw doesn't change heights.)
+    down_t = -matrix_from_quat(q_pre)[:, 2, :]
+    down_h = torch.einsum("nji,nj->ni", tab["head_rot"][k], down_t)
+    support = (down_h @ tab["head_verts"].T).max(dim=1).values + (down_t * tab["head_pos"][k]).sum(dim=-1)
+    drop = (
+        torch.rand(num, device=dev) * (headstand_drop_range[1] - headstand_drop_range[0])
+        + headstand_drop_range[0]
+    )
+    z_stand = (
+        torch.rand(num, device=dev) * (standing_z_range[1] - standing_z_range[0]) + standing_z_range[0]
+    )
+    new_z = torch.where(is_head, support + drop, z_stand)
+
+    fq, fv = tab["free_qadr"], tab["free_vadr"]
+    env.sim.data.qpos[env_ids, fq + 2] = new_z + _env_origin_z(env, env_ids)
+    env.sim.data.qpos[env_ids, fq + 3:fq + 7] = quat
+    env.sim.data.qvel[env_ids, fv:fv + 6] = 0.0
+
+    head_ids = env_ids[is_head]
+    if len(head_ids) > 0:
+        joints = tab["joints"][k[is_head]].clone()
+        if leg_joint_noise_std > 0.0:
+            cols = tab["leg_cols"]
+            joints[:, cols] += torch.randn(len(head_ids), len(cols), device=dev) * leg_joint_noise_std
+        joints = torch.maximum(torch.minimum(joints, tab["hi"]), tab["lo"])
+        env.sim.data.qpos[head_ids.unsqueeze(1), tab["qadr"].unsqueeze(0)] = joints
+        if headstand_ang_vel_max > 0.0:
+            # Free-joint angular velocity is in the body frame; x/y = roll/pitch.
+            omega = (torch.rand(len(head_ids), 2, device=dev) * 2 - 1) * headstand_ang_vel_max
+            env.sim.data.qvel[head_ids, fv + 3] = omega[:, 0]
+            env.sim.data.qvel[head_ids, fv + 4] = omega[:, 1]
+
+    env._headstand_hold_s[env_ids] = 0.0
+    env._headstand_lost_s[env_ids] = 0.0
+    env._headstand_phi_delta[env_ids] = 0.0
+    env._headstand_phi[env_ids] = is_head.float()
+    env._headstand_latch[env_ids] = is_head
+
+
+def headstand_hold(
+    env: ManagerBasedRlEnv,
+    tilt_std: float = 0.5,
+    ang_vel_std: float = 2.0,
+    joint_vel_std: float = 2.0,
+    still_floor: float = 0.4,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Per-step annuity for balancing on the head alone, still.
+
+    only_head × exp(-tilt²/tilt_std²) × (still_floor + (1-still_floor)·still)
+
+    only_head is a HARD gate (head touches, nothing else does): a head+feet
+    tripod, a face-plant with the trunk down, a hop and a bounce all pay zero.
+    tilt is the head-top axis off straight-down — resting on the flat top pays
+    full, teetering on the rim pays less. still = Gaussian on trunk angular
+    speed × Gaussian on servo RMS speed; the floor keeps a wobbling balance
+    visibly paid so the first holds aren't invisible.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    top_cos, only_head, good = _headstand_update(env, asset)
+    # 2·(1 - cos θ) ≈ θ² near the goal, and stays monotonic all the way round.
+    tilt_g = torch.exp(-2.0 * (1.0 - top_cos) / (tilt_std * tilt_std))
+    omega = torch.nan_to_num(asset.data.root_link_ang_vel_b, nan=0.0).norm(dim=-1)
+    qd = torch.nan_to_num(_servo_joint_vel(env, asset), nan=0.0).pow(2).mean(dim=-1).sqrt()
+    still = torch.exp(-((omega / ang_vel_std) ** 2)) * torch.exp(-((qd / joint_vel_std) ** 2))
+    env.extras["log"]["Metrics/headstand_only_head"] = good.float().mean()
+    return only_head.float() * tilt_g * (still_floor + (1.0 - still_floor) * still)
+
+
+def headstand_progress(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Δ(slewed mount potential) / step_dt — potential-based, signed.
+
+    A full mount pays 1 in total (after the reward manager's dt), coming down
+    off the head pays -1, holding ANY pose pays 0 — nothing to farm from a
+    bow, a tripod or a face-plant. The potential is tracked through a symmetric
+    slew (_HEADSTAND_PHI_RATE), so arriving faster than the slew earns nothing
+    extra and contact-force jitter cancels instead of being paid.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    _headstand_update(env, asset)
+    return env._headstand_phi_delta / env.step_dt
+
+
+def headstand_lost(
+    env: ManagerBasedRlEnv,
+    grace_s: float = 1.0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Terminate once an established headstand has been lost for grace_s.
+
+    Only armed by the latch (0.3 s on the head alone, or an on-head spawn), so
+    an episode that never got onto the head is never cut — this is not a
+    not-standing/not-headstanding condition, it recycles the episode after a
+    fall so the hold gets fresh attempts instead of seconds on the floor.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    _headstand_update(env, asset)
+    return env._headstand_lost_s >= grace_s
+
+
+def headstand_critic_state(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Critic-only privileged obs: [top_cos, head_contact, other_contact, load].
+
+    Reads the instantaneous measurement, not the step cache — observations are
+    computed after resets, where the cache still holds the pre-reset step.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    top_cos, head_contact, other_contact, load = _headstand_measure(env, asset)
+    return torch.stack([top_cos, head_contact.float(), other_contact.float(), load], dim=-1)
