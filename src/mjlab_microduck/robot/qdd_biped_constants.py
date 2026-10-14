@@ -1,4 +1,4 @@
-"""QDD biped (5.66 kg, ~0.52 m, 10 quasi-direct-drive joints) robot cfg for mjlab.
+"""QDD biped (6.36 kg, ~0.52 m, 10 quasi-direct-drive joints) robot cfg for mjlab.
 
 Source of truth is the robot repo (robot/model.py); qdd_biped/qdd_biped.xml is
 generated from it by qdd_biped/generate_mjcf.py. Values copied here by hand:
@@ -6,7 +6,7 @@ generated from it by qdd_biped/generate_mjcf.py. Values copied here by hand:
   MOTORS (robot/model.py)
     GIM6010-8   hip_yaw / hip_roll / hip_pitch / knee : peak 11 Nm, 44 rad/s,
                 armature 6e-5 * 8^2 = 3.84e-3 kg m^2
-    GIM4310-10  ankle_pitch                           : peak 5.6 Nm, 23.9 rad/s,
+    GIM3510-8   ankle_pitch                           : peak 6.28 Nm, 42.4 rad/s,
                 armature 1.5e-5 * 10^2 = 1.5e-3 kg m^2
   (armature is already in the XML joints; not overridden here.)
 
@@ -68,7 +68,7 @@ HOME_FRAME = EntityCfg.InitialStateCfg(
 
 # --- Actuators -----------------------------------------------------------------
 GIM6010_PEAK = 11.0
-GIM4310_PEAK = 5.6
+ANKLE_PEAK = 6.28   # GIM3510-8 (GDZ34 + output-side encoder)
 
 HIP_YAW_ROLL_KP, HIP_YAW_ROLL_KD = 30.0, 1.0
 HIP_PITCH_KNEE_KP, HIP_PITCH_KNEE_KD = 40.0, 1.2
@@ -96,7 +96,7 @@ QDD_ACTUATOR_ANKLE = BuiltinPositionActuatorCfg(
     target_names_expr=(r".*_ankle_pitch",),
     stiffness=ANKLE_KP,
     damping=ANKLE_KD,
-    effort_limit=GIM4310_PEAK,
+    effort_limit=ANKLE_PEAK,
     **_DELAY,
 )
 
