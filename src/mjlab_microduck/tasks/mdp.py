@@ -7669,3 +7669,66 @@ def roulade_lateral_velocity_penalty(
     """Body-frame lateral (y) linear velocity² — keeps the roll straight."""
     asset: Entity = env.scene[asset_cfg.name]
     return torch.nan_to_num(asset.data.root_link_lin_vel_b[:, 1].pow(2), nan=0.0)
+
+
+# =============================================================================
+# QDD biped (Mjlab-Velocity-Flat-QddBiped) — robot repo robot/model.py knee_max
+# =============================================================================
+# Pose-dependent knee limit: with the hip extended, a deeply folded knee brings
+# the ankle motor / heel into the roll motor and yaw bracket behind the hip.
+# Step function ported verbatim from robot/model.py knee_max():
+#   hip_pitch >   0 deg -> knee <=  85 deg
+#   hip_pitch > -15 deg -> knee <=  90 deg
+#   hip_pitch > -30 deg -> knee <= 100 deg
+#   hip_pitch > -45 deg -> knee <= 110 deg
+#   otherwise           -> knee <= 120 deg (= the static joint range)
+# Breakpoints ordered from most negative so later (stricter) ones override.
+QDD_KNEE_MAX_STEPS_DEG = ((-45.0, 110.0), (-30.0, 100.0), (-15.0, 90.0), (0.0, 85.0))
+QDD_KNEE_MAX_FLOOR_DEG = 120.0
+_QDD_HIP_PITCH_JOINTS = ("l_hip_pitch", "r_hip_pitch")
+_QDD_KNEE_JOINTS = ("l_knee", "r_knee")
+
+
+def qdd_knee_max(hip_pitch: torch.Tensor) -> torch.Tensor:
+    """Vectorised robot/model.py knee_max: hip pitch [rad] -> knee upper limit [rad]."""
+    hp_deg = torch.rad2deg(hip_pitch)
+    k = torch.full_like(hp_deg, QDD_KNEE_MAX_FLOOR_DEG)
+    for thr, kmax in QDD_KNEE_MAX_STEPS_DEG:
+        k = torch.where(hp_deg > thr, torch.full_like(k, kmax), k)
+    return torch.deg2rad(k)
+
+
+def _qdd_knee_excess(env: ManagerBasedRlEnv, asset: Entity, margin: float) -> torch.Tensor:
+    """Per-leg knee overshoot beyond knee_max(hip_pitch) - margin, [num_envs, 2], >= 0 (rad)."""
+    ids = getattr(env, "_qdd_knee_limit_ids", None)
+    if ids is None:
+        hip_ids, _ = asset.find_joints(_QDD_HIP_PITCH_JOINTS, preserve_order=True)
+        knee_ids, _ = asset.find_joints(_QDD_KNEE_JOINTS, preserve_order=True)
+        ids = (hip_ids, knee_ids)
+        env._qdd_knee_limit_ids = ids
+    hip_ids, knee_ids = ids
+    q = asset.data.joint_pos
+    limit = qdd_knee_max(q[:, hip_ids]) - margin
+    return torch.clamp(q[:, knee_ids] - limit, min=0.0)
+
+
+def qdd_knee_limit_cost(
+    env: ManagerBasedRlEnv,
+    margin: float = 0.0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """mjlab-style COST (>= 0, use a NEGATIVE weight): summed knee overshoot [rad]
+    beyond the pose-dependent knee_max(hip_pitch) - margin, both legs."""
+    asset: Entity = env.scene[asset_cfg.name]
+    return torch.nan_to_num(_qdd_knee_excess(env, asset, margin).sum(dim=1), nan=0.0)
+
+
+def qdd_knee_limit_exceeded(
+    env: ManagerBasedRlEnv,
+    tolerance: float = 0.15,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Termination: a knee is more than ``tolerance`` rad past knee_max(hip_pitch)
+    (on hardware the parts would collide / the safety layer would trip)."""
+    asset: Entity = env.scene[asset_cfg.name]
+    return (_qdd_knee_excess(env, asset, 0.0) > tolerance).any(dim=1)

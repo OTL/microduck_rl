@@ -278,3 +278,18 @@ for _task_id, _make_cfg, _kw, _rl_cfg, _robot_cfg in _BACKLASH_TASKS:
         rl_cfg=_rl_cfg,
         runner_cls=MicroduckOnPolicyRunner,
     )
+
+# QDD biped (a different robot: 5.66 kg, 10 QDD joints) — flat-ground velocity
+# tracking. Own obs layout (39-D actor), not part of the microduck 61-D family.
+from .qdd_biped_velocity_env_cfg import (
+    make_qdd_biped_velocity_env_cfg,
+    QddBipedRlCfg,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-Velocity-Flat-QddBiped",
+    env_cfg=make_qdd_biped_velocity_env_cfg(),
+    play_env_cfg=make_qdd_biped_velocity_env_cfg(play=True),
+    rl_cfg=QddBipedRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)

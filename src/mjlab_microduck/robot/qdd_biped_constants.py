@@ -1,0 +1,143 @@
+"""QDD biped (5.66 kg, ~0.52 m, 10 quasi-direct-drive joints) robot cfg for mjlab.
+
+Source of truth is the robot repo (robot/model.py); qdd_biped/qdd_biped.xml is
+generated from it by qdd_biped/generate_mjcf.py. Values copied here by hand:
+
+  MOTORS (robot/model.py)
+    GIM6010-8   hip_yaw / hip_roll / hip_pitch / knee : peak 11 Nm, 44 rad/s,
+                armature 6e-5 * 8^2 = 3.84e-3 kg m^2
+    GIM4310-10  ankle_pitch                           : peak 5.6 Nm, 23.9 rad/s,
+                armature 1.5e-5 * 10^2 = 1.5e-3 kg m^2
+  (armature is already in the XML joints; not overridden here.)
+
+Unlike the microduck (Dynamixel XL330, BAM voltage model), these drivers run the
+PD loop themselves in MIT mode at >= 1 kHz from position targets sent at 50 Hz,
+so the sim actuator is MuJoCo's built-in position PD (implicit, physics rate)
+with an effort clamp at peak torque. The SAME Kp/Kd must be programmed into the
+drivers on the real robot (they are exported in the ONNX metadata).
+
+Gain choice (checked in plain MuJoCo, 5 s stand at the default pose: settles,
+feet flat, ~4.5 deg backward torso lean from PD sag that the policy corrects):
+  hip_pitch / knee : Kp 40 Nm/rad, Kd 1.2  (knee ~critically damped for the
+                     shank+foot+armature ~0.008 kg m^2; 1.6 Nm gravity load in
+                     double support -> 0.04 rad sag)
+  hip_yaw / roll   : Kp 30, Kd 1.0
+  ankle_pitch      : Kp 20, Kd 0.6         (smaller motor, light foot)
+"""
+
+import math
+import os
+from pathlib import Path
+
+import mujoco
+from mjlab.actuator import BuiltinPositionActuatorCfg
+from mjlab.entity import EntityArticulationInfoCfg, EntityCfg
+from mjlab.utils.spec_config import CollisionCfg
+
+QDD_BIPED_XML: Path = Path(os.path.dirname(__file__)) / "qdd_biped" / "qdd_biped.xml"
+assert QDD_BIPED_XML.exists(), f"XML not found: {QDD_BIPED_XML}"
+
+# Names (as in robot/model.py JOINT_NAMES): {l,r}_{hip_yaw,hip_roll,hip_pitch,knee,ankle_pitch}
+# Action / obs order = XML joint order: l_hip_yaw .. l_ankle_pitch, r_hip_yaw .. r_ankle_pitch.
+QDD_JOINT_NAMES = tuple(
+    f"{s}_{j}" for s in ("l", "r") for j in ("hip_yaw", "hip_roll", "hip_pitch", "knee", "ankle_pitch")
+)
+TORSO_BODY = "torso"
+FOOT_SITES = ("l_foot_site", "r_foot_site")
+FOOT_GEOMS = ("l_foot_collision", "r_foot_collision")
+
+# --- Default pose: robot/model.py crouch_pose(45 deg) --------------------------
+CROUCH_KNEE_DEG = 45.0
+_k = math.radians(CROUCH_KNEE_DEG)
+DEFAULT_JOINT_POS = {
+    r".*_hip_yaw": 0.0,
+    r".*_hip_roll": 0.0,
+    r".*_hip_pitch": -_k / 2,
+    r".*_knee": _k,
+    r".*_ankle_pitch": -_k / 2,
+}
+# Torso-origin height with the soles on the floor in that pose: yaw->roll 0.064 +
+# 2 * 0.13 * cos(22.5 deg) + ankle->sole 0.040 = 0.3442 m (checked with MuJoCo).
+STAND_BASE_Z = 0.3442
+
+HOME_FRAME = EntityCfg.InitialStateCfg(
+    pos=(0.0, 0.0, STAND_BASE_Z + 0.005),
+    joint_pos=DEFAULT_JOINT_POS,
+    joint_vel={".*": 0.0},
+)
+
+# --- Actuators -----------------------------------------------------------------
+GIM6010_PEAK = 11.0
+GIM4310_PEAK = 5.6
+
+HIP_YAW_ROLL_KP, HIP_YAW_ROLL_KD = 30.0, 1.0
+HIP_PITCH_KNEE_KP, HIP_PITCH_KNEE_KD = 40.0, 1.2
+ANKLE_KP, ANKLE_KD = 20.0, 0.6
+
+# Command latency: policy (Pi 5) -> CAN -> driver. 0-2 physics steps of 5 ms
+# (0-10 ms), resampled per env.
+_DELAY = dict(delay_min_lag=0, delay_max_lag=2)
+
+QDD_ACTUATOR_HIP_YAW_ROLL = BuiltinPositionActuatorCfg(
+    target_names_expr=(r".*_hip_yaw", r".*_hip_roll"),
+    stiffness=HIP_YAW_ROLL_KP,
+    damping=HIP_YAW_ROLL_KD,
+    effort_limit=GIM6010_PEAK,
+    **_DELAY,
+)
+QDD_ACTUATOR_HIP_PITCH_KNEE = BuiltinPositionActuatorCfg(
+    target_names_expr=(r".*_hip_pitch", r".*_knee"),
+    stiffness=HIP_PITCH_KNEE_KP,
+    damping=HIP_PITCH_KNEE_KD,
+    effort_limit=GIM6010_PEAK,
+    **_DELAY,
+)
+QDD_ACTUATOR_ANKLE = BuiltinPositionActuatorCfg(
+    target_names_expr=(r".*_ankle_pitch",),
+    stiffness=ANKLE_KP,
+    damping=ANKLE_KD,
+    effort_limit=GIM4310_PEAK,
+    **_DELAY,
+)
+
+QDD_ARTICULATION = EntityArticulationInfoCfg(
+    actuators=(QDD_ACTUATOR_HIP_YAW_ROLL, QDD_ACTUATOR_HIP_PITCH_KNEE, QDD_ACTUATOR_ANKLE),
+    soft_joint_pos_limit_factor=0.9,
+)
+
+# Action scale (rad per unit action). The mjlab G1 rule 0.25 * effort / Kp gives
+# 0.069-0.092 rad here, too small for a 0.13 m-link leg to step with unit-std
+# exploration; 0.25 rad keeps initial exploration at about +/-15 deg per joint.
+QDD_ACTION_SCALE = 0.25
+
+# --- Collisions ------------------------------------------------------------------
+# Feet: condim 3 (friction) + priority so their friction wins vs the floor.
+# Everything else (torso boxes, thigh/shank capsules, knee-motor spheres):
+# condim 1, used to detect falls (torso) and leg-leg self-collision.
+FULL_COLLISION = CollisionCfg(
+    geom_names_expr=(r".*_collision",),
+    condim={r"^(l|r)_foot_collision$": 3, r".*_collision": 1},
+    priority={r"^(l|r)_foot_collision$": 1},
+    friction={r"^(l|r)_foot_collision$": (0.8,)},
+)
+
+
+def get_qdd_biped_spec() -> mujoco.MjSpec:
+    return mujoco.MjSpec.from_file(str(QDD_BIPED_XML))
+
+
+def get_qdd_biped_robot_cfg() -> EntityCfg:
+    """Fresh cfg each call (cfgs are mutated by env factories)."""
+    return EntityCfg(
+        spec_fn=get_qdd_biped_spec,
+        init_state=HOME_FRAME,
+        collisions=(FULL_COLLISION,),
+        articulation=QDD_ARTICULATION,
+    )
+
+
+def knee_max(hip_pitch_rad: float) -> float:
+    """Pose-dependent knee limit [rad] — verbatim port of robot/model.py knee_max."""
+    hp = math.degrees(hip_pitch_rad)
+    k = 85 if hp > 0 else 90 if hp > -15 else 100 if hp > -30 else 110 if hp > -45 else 120
+    return math.radians(k)
