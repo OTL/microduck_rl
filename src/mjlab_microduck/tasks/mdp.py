@@ -7732,3 +7732,220 @@ def qdd_knee_limit_exceeded(
     (on hardware the parts would collide / the safety layer would trip)."""
     asset: Entity = env.scene[asset_cfg.name]
     return (_qdd_knee_excess(env, asset, 0.0) > tolerance).any(dim=1)
+
+
+# =============================================================================
+# QDD biped gait clock + human-like gait terms (Mjlab-Velocity-Flat-QddBiped)
+# =============================================================================
+# One scalar phase phi in [0, 1) per env, advanced by dt / period every policy
+# step while the twist command is "active" (|v_xy| + |w_z| > threshold) and
+# held otherwise (standing: clock paused, both feet scheduled down). The policy
+# sees [sin(2 pi phi), cos(2 pi phi)]; the real-robot controller runs the same
+# clock (see robot/qdd_biped/policy_io.json "gait_clock").
+#
+# Contact schedule (per leg, leg phase phi_L = phi, phi_R = phi + 0.5 mod 1):
+#   leg phase in [0, swing_fraction)  -> swing   (foot in the air)
+#   leg phase in [swing_fraction, 1)  -> stance
+# swing_fraction 0.4 -> alternating single support with two double-support
+# windows of (0.5 - 0.4) * period each. Mirror symmetry: phi -> phi + 0.5
+# swaps the legs, i.e. (sin, cos) -> (-sin, -cos).
+
+
+def qdd_gait_active(command: torch.Tensor, threshold: float) -> torch.Tensor:
+    """[B] bool: twist command large enough to walk (|v_xy| + |w_z| > threshold)."""
+    return (torch.norm(command[:, :2], dim=1) + torch.abs(command[:, 2])) > threshold
+
+
+class GaitClockCommand(CommandTerm):
+    """Gait phase clock. ``command`` = phase in [0, 1), shape [B, 1]."""
+
+    cfg: "GaitClockCommandCfg"
+
+    def __init__(self, cfg: "GaitClockCommandCfg", env: ManagerBasedRlEnv):
+        super().__init__(cfg, env)
+        self.phase = torch.zeros(self.num_envs, 1, device=self.device)
+        self.active = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self._dt = env.step_dt
+
+    @property
+    def command(self) -> torch.Tensor:
+        return self.phase
+
+    def _update_metrics(self) -> None:
+        pass
+
+    def _resample_command(self, env_ids: torch.Tensor) -> None:
+        # Only called at episode reset (resampling_time_range is huge): random
+        # start phase so both legs learn to lead.
+        if self.cfg.random_initial_phase:
+            self.phase[env_ids, 0] = torch.rand(len(env_ids), device=self.device)
+        else:
+            self.phase[env_ids, 0] = 0.0
+
+    def _update_command(self) -> None:
+        twist = self._env.command_manager.get_command(self.cfg.velocity_command_name)
+        self.active = qdd_gait_active(twist, self.cfg.active_threshold)
+        step = self._dt / self.cfg.period_s
+        self.phase[:, 0] = torch.where(
+            self.active, torch.remainder(self.phase[:, 0] + step, 1.0), self.phase[:, 0]
+        )
+
+
+@_dataclass(kw_only=True)
+class GaitClockCommandCfg(CommandTermCfg):
+    resampling_time_range: tuple[float, float] = (1.0e9, 1.0e9)  # reset only
+    velocity_command_name: str = "twist"
+    period_s: float = 0.64
+    swing_fraction: float = 0.4
+    active_threshold: float = 0.05
+    random_initial_phase: bool = True
+
+    def build(self, env: ManagerBasedRlEnv) -> GaitClockCommand:
+        return GaitClockCommand(self, env)
+
+
+def _qdd_gait(env: ManagerBasedRlEnv, command_name: str) -> GaitClockCommand:
+    term = env.command_manager.get_term(command_name)
+    assert isinstance(term, GaitClockCommand)
+    return term
+
+
+def qdd_gait_schedule(env: ManagerBasedRlEnv, command_name: str = "gait"):
+    """(swing [B,2] bool, swing progress [B,2] in [0,1], active [B] bool), legs (l, r).
+
+    Inactive (standing) envs: no leg in swing."""
+    gait = _qdd_gait(env, command_name)
+    phi = gait.phase[:, 0]
+    leg_phase = torch.stack((phi, torch.remainder(phi + 0.5, 1.0)), dim=1)
+    sf = gait.cfg.swing_fraction
+    swing = (leg_phase < sf) & gait.active.unsqueeze(1)
+    progress = torch.clamp(leg_phase / sf, max=1.0)
+    return swing, progress, gait.active
+
+
+def gait_phase_obs(env: ManagerBasedRlEnv, command_name: str = "gait") -> torch.Tensor:
+    """[sin(2 pi phi), cos(2 pi phi)]."""
+    phi = _qdd_gait(env, command_name).phase
+    ang = 2.0 * math.pi * phi
+    return torch.cat((torch.sin(ang), torch.cos(ang)), dim=1)
+
+
+def gait_contact_schedule(
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    command_name: str = "gait",
+) -> torch.Tensor:
+    """REWARD in [0, 1]: fraction of feet whose ground contact matches the clock
+    (swing -> in the air, stance / standing -> on the ground)."""
+    from mjlab.sensor import ContactSensor
+
+    sensor: ContactSensor = env.scene[sensor_name]
+    assert sensor.data.found is not None
+    contact = sensor.data.found > 0  # [B, 2] (l, r)
+    swing, _, _ = qdd_gait_schedule(env, command_name)
+    match = (contact != swing).float()
+    return match.mean(dim=1)
+
+
+def gait_foot_height_tracking(
+    env: ManagerBasedRlEnv,
+    swing_height: float,
+    std: float,
+    command_name: str = "gait",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """REWARD in [0, 1]: sole height (foot site z, flat ground) tracks
+    h_ref = swing_height * sin(pi * swing_progress) in swing and 0 in stance."""
+    asset: Entity = env.scene[asset_cfg.name]
+    h = asset.data.site_pos_w[:, asset_cfg.site_ids, 2]  # [B, 2]
+    swing, progress, _ = qdd_gait_schedule(env, command_name)
+    h_ref = torch.where(swing, swing_height * torch.sin(math.pi * progress), torch.zeros_like(h))
+    err = torch.square(torch.clamp(h, min=0.0) - h_ref)
+    sw = swing.float()
+    env.extras["log"]["Metrics/swing_foot_height_mean"] = (h * sw).sum() / torch.clamp(sw.sum(), min=1.0)
+    return torch.nan_to_num(torch.exp(-err / std**2).mean(dim=1), nan=0.0)
+
+
+def feet_tilt_near_ground(
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    height_threshold: float = 0.02,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """COST (>= 0): sole tilt (|xy of gravity in the foot frame|^2) for feet in
+    contact or within ``height_threshold`` of the ground -> flat touchdown and
+    flat stance. Airborne feet higher up are free (toe-off / swing)."""
+    from mjlab.sensor import ContactSensor
+    import torch.nn.functional as F
+
+    asset: Entity = env.scene[asset_cfg.name]
+    sensor: ContactSensor = env.scene[sensor_name]
+    g = F.normalize(asset.data.gravity_vec_w, dim=-1)  # [B, 3]
+    quats = asset.data.site_quat_w[:, asset_cfg.site_ids, :]  # [B, 2, 4]
+    n = quats.shape[1]
+    proj = quat_apply_inverse(quats.reshape(-1, 4), g.repeat_interleave(n, dim=0)).reshape(-1, n, 3)
+    tilt = torch.sum(torch.square(proj[..., :2]), dim=-1)  # [B, 2]
+    h = asset.data.site_pos_w[:, asset_cfg.site_ids, 2]
+    assert sensor.data.found is not None
+    near = (sensor.data.found > 0) | (h < height_threshold)
+    return torch.nan_to_num((tilt * near.float()).sum(dim=1), nan=0.0)
+
+
+class feet_touchdown_velocity:
+    """COST (>= 0): squared downward sole velocity on the step before touchdown
+    (first contact), summed over feet -> soft, low-impact footfalls."""
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+        self.prev_vz = torch.zeros(env.num_envs, 2, device=env.device)
+        self.step_dt = env.step_dt
+
+    def __call__(
+        self,
+        env: ManagerBasedRlEnv,
+        sensor_name: str,
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    ) -> torch.Tensor:
+        from mjlab.sensor import ContactSensor
+
+        asset: Entity = env.scene[asset_cfg.name]
+        sensor: ContactSensor = env.scene[sensor_name]
+        first = sensor.compute_first_contact(dt=self.step_dt).float()  # [B, 2]
+        vz_down = torch.clamp(-self.prev_vz, min=0.0)
+        cost = torch.sum(torch.square(vz_down) * first, dim=1)
+        self.prev_vz = asset.data.site_lin_vel_w[:, asset_cfg.site_ids, 2].clone()
+        return torch.nan_to_num(cost, nan=0.0)
+
+    def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
+        if env_ids is None:
+            self.prev_vz.zero_()
+        else:
+            self.prev_vz[env_ids] = 0.0
+
+
+def feet_lateral_spacing(
+    env: ManagerBasedRlEnv,
+    min_spacing: float,
+    max_spacing: float,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """COST (>= 0, m): left-minus-right sole offset along the heading-frame y
+    axis outside [min_spacing, max_spacing] (no crossing, no wide straddle)."""
+    asset: Entity = env.scene[asset_cfg.name]
+    p = asset.data.site_pos_w[:, asset_cfg.site_ids, :2]  # [B, 2(l,r), 2]
+    d = p[:, 0] - p[:, 1]
+    yaw = asset.data.heading_w
+    dy = -torch.sin(yaw) * d[:, 0] + torch.cos(yaw) * d[:, 1]
+    cost = torch.clamp(min_spacing - dy, min=0.0) + torch.clamp(dy - max_spacing, min=0.0)
+    return torch.nan_to_num(cost, nan=0.0)
+
+
+def joint_deviation_l2(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """COST (>= 0): sum of squared deviations from the default pose for the
+    selected joints (rad^2)."""
+    asset: Entity = env.scene[asset_cfg.name]
+    q = asset.data.joint_pos[:, asset_cfg.joint_ids]
+    q0 = asset.data.default_joint_pos[:, asset_cfg.joint_ids]
+    return torch.nan_to_num(torch.sum(torch.square(q - q0), dim=1), nan=0.0)

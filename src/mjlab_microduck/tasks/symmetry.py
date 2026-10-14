@@ -167,3 +167,76 @@ def microduck_vel_symmetry(
         aug_actions = torch.cat([actions, actions_sym], dim=0)
 
     return aug_obs, aug_actions
+
+
+# ---------------------------------------------------------------------------
+# QDD biped (Mjlab-Velocity-Flat-QddBiped), 41-D actor obs
+# ---------------------------------------------------------------------------
+# Layout (must match robot/qdd_biped/policy_io.json, checked by tests):
+#   [0:3] base_ang_vel  [3:6] projected_gravity  [6:16] joint_pos  [16:26] joint_vel
+#   [26:36] last_action  [36:39] twist command  [39:41] gait_phase (sin, cos)
+# Joint order: l_{hip_yaw,hip_roll,hip_pitch,knee,ankle_pitch}, r_{...}. Both legs
+# use the SAME joint axes (yaw z, roll x, pitch y), so under the sagittal-plane
+# reflection the legs swap and yaw/roll negate; pitch/knee/ankle keep sign.
+# Gait phase: phi -> phi + 0.5 swaps the legs' schedule -> (sin, cos) negate.
+QDD_JOINT_PERM: list[int] = [5, 6, 7, 8, 9, 0, 1, 2, 3, 4]
+QDD_JOINT_SIGN: list[float] = [-1.0, -1.0, 1.0, 1.0, 1.0] * 2
+QDD_OBS_PERM: list[int] = (
+    [0, 1, 2]
+    + [3, 4, 5]
+    + [6 + j for j in QDD_JOINT_PERM]
+    + [16 + j for j in QDD_JOINT_PERM]
+    + [26 + j for j in QDD_JOINT_PERM]
+    + [36, 37, 38]
+    + [39, 40]
+)
+QDD_OBS_SIGN: list[float] = (
+    [-1.0, 1.0, -1.0]
+    + [1.0, -1.0, 1.0]
+    + QDD_JOINT_SIGN * 3
+    + [1.0, -1.0, -1.0]
+    + [-1.0, -1.0]
+)
+
+QDD_SYMMETRY_CFG = {
+    "use_data_augmentation": False,
+    "use_mirror_loss": True,
+    "mirror_loss_coeff": 0.5,
+    "data_augmentation_func": "mjlab_microduck.tasks.symmetry.qdd_biped_symmetry",
+}
+
+_qdd_cache: dict[torch.device, tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = {}
+
+
+def _qdd_tensors(device: torch.device):
+    if device not in _qdd_cache:
+        _qdd_cache[device] = (
+            torch.tensor(QDD_OBS_PERM, dtype=torch.long, device=device),
+            torch.tensor(QDD_OBS_SIGN, dtype=torch.float32, device=device),
+            torch.tensor(QDD_JOINT_PERM, dtype=torch.long, device=device),
+            torch.tensor(QDD_JOINT_SIGN, dtype=torch.float32, device=device),
+        )
+    return _qdd_cache[device]
+
+
+def qdd_biped_symmetry(env, obs: TensorDict | None, actions: torch.Tensor | None):
+    """rsl_rl symmetry function for the QDD biped: returns [original; mirrored].
+    Only the actor obs is mirrored (use with use_mirror_loss, not augmentation)."""
+    aug_obs = None
+    aug_actions = None
+    if obs is not None:
+        actor = obs["actor"]
+        obs_perm, obs_sign, _, _ = _qdd_tensors(actor.device)
+        critic = obs["critic"]
+        aug_obs = TensorDict(
+            {
+                "actor": torch.cat([actor, actor[:, obs_perm] * obs_sign], dim=0),
+                "critic": torch.cat([critic, critic], dim=0),
+            },
+            batch_size=[actor.shape[0] * 2],
+            device=actor.device,
+        )
+    if actions is not None:
+        _, _, act_perm, act_sign = _qdd_tensors(actions.device)
+        aug_actions = torch.cat([actions, actions[:, act_perm] * act_sign], dim=0)
+    return aug_obs, aug_actions

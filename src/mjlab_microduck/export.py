@@ -264,6 +264,11 @@ def run_export(task_id: str, cfg: ExportConfig) -> ExportResult:
     runner.export_policy_to_onnx(path, filename)
 
     metadata = get_base_metadata(runner.env.unwrapped, run_path=cfg.checkpoint_file)
+    if task_id == "Mjlab-Velocity-Flat-QddBiped":
+        # Real-robot I/O contract (robot/qdd_biped/policy_io.json) + its sha256.
+        from mjlab_microduck.tasks.qdd_biped_velocity_env_cfg import policy_io_onnx_metadata
+
+        metadata.update(policy_io_onnx_metadata())
     attach_metadata_to_onnx(onnx_path, metadata)
 
     print(f"Written {onnx_path}")

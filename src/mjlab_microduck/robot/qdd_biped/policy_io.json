@@ -1,0 +1,240 @@
+{
+  "schema_version": 1,
+  "task": "Mjlab-Velocity-Flat-QddBiped",
+  "control_rate_hz": 50.0,
+  "policy_dt_s": 0.02,
+  "onnx": {
+    "input": {
+      "name": "obs",
+      "shape": [
+        1,
+        41
+      ],
+      "dtype": "float32"
+    },
+    "output": {
+      "name": "actions",
+      "shape": [
+        1,
+        10
+      ],
+      "dtype": "float32"
+    },
+    "obs_normalization": "baked into the ONNX graph: feed RAW observations",
+    "output_is": "deterministic action mean"
+  },
+  "action": {
+    "dim": 10,
+    "joint_order": [
+      "l_hip_yaw",
+      "l_hip_roll",
+      "l_hip_pitch",
+      "l_knee",
+      "l_ankle_pitch",
+      "r_hip_yaw",
+      "r_hip_roll",
+      "r_hip_pitch",
+      "r_knee",
+      "r_ankle_pitch"
+    ],
+    "scale": 0.25,
+    "default_joint_pos": [
+      0.0,
+      0.0,
+      -0.39269908169872414,
+      0.7853981633974483,
+      -0.39269908169872414,
+      0.0,
+      0.0,
+      -0.39269908169872414,
+      0.7853981633974483,
+      -0.39269908169872414
+    ],
+    "target": "q_target = default_joint_pos + scale * action",
+    "clip": null,
+    "filter": null
+  },
+  "actuators": {
+    "mode": "driver-side PD (MIT mode, >= 1 kHz): tau = kp * (q_target - q) - kd * qd, clamped to +/- effort_limit",
+    "joint_order": [
+      "l_hip_yaw",
+      "l_hip_roll",
+      "l_hip_pitch",
+      "l_knee",
+      "l_ankle_pitch",
+      "r_hip_yaw",
+      "r_hip_roll",
+      "r_hip_pitch",
+      "r_knee",
+      "r_ankle_pitch"
+    ],
+    "kp_nm_per_rad": [
+      30.0,
+      30.0,
+      40.0,
+      40.0,
+      20.0,
+      30.0,
+      30.0,
+      40.0,
+      40.0,
+      20.0
+    ],
+    "kd_nm_s_per_rad": [
+      1.0,
+      1.0,
+      1.2,
+      1.2,
+      0.6,
+      1.0,
+      1.0,
+      1.2,
+      1.2,
+      0.6
+    ],
+    "effort_limit_nm": [
+      11.0,
+      11.0,
+      11.0,
+      11.0,
+      6.28,
+      11.0,
+      11.0,
+      11.0,
+      11.0,
+      6.28
+    ],
+    "joint_pos_limits_rad": [
+      [
+        -0.523599,
+        0.523599
+      ],
+      [
+        -0.436332,
+        0.349066
+      ],
+      [
+        -1.74533,
+        0.698132
+      ],
+      [
+        0.0,
+        2.0944
+      ],
+      [
+        -0.872665,
+        0.872665
+      ],
+      [
+        -0.523599,
+        0.523599
+      ],
+      [
+        -0.349066,
+        0.436332
+      ],
+      [
+        -1.74533,
+        0.698132
+      ],
+      [
+        0.0,
+        2.0944
+      ],
+      [
+        -0.872665,
+        0.872665
+      ]
+    ],
+    "knee_max_note": "pose-dependent knee limit knee_max(hip_pitch) from robot/model.py (80/90/100/110/120 deg for hip_pitch > 0/-15/-30/-45/else deg) must be enforced by the safety layer"
+  },
+  "observation": {
+    "dim": 41,
+    "history_length": 1,
+    "scaling": "none (all terms in the units listed)",
+    "clip": null,
+    "terms": [
+      {
+        "name": "base_ang_vel",
+        "start": 0,
+        "size": 3,
+        "source": "imu_gyro",
+        "units": "rad/s",
+        "description": "torso angular velocity [wx, wy, wz] in the torso frame (x forward, y left, z up); raw gyro rotated into the torso frame"
+      },
+      {
+        "name": "projected_gravity",
+        "start": 3,
+        "size": 3,
+        "source": "projected_gravity",
+        "units": "unit vector",
+        "description": "gravity direction in the torso frame, normalised; (0, 0, -1) when upright (from the IMU orientation estimate: R_world_torso^T @ [0, 0, -1])"
+      },
+      {
+        "name": "joint_pos",
+        "start": 6,
+        "size": 10,
+        "source": "joint_pos_rel",
+        "units": "rad",
+        "description": "q - default_joint_pos, action.joint_order, output-side encoders"
+      },
+      {
+        "name": "joint_vel",
+        "start": 16,
+        "size": 10,
+        "source": "joint_vel",
+        "units": "rad/s",
+        "description": "joint velocity, action.joint_order"
+      },
+      {
+        "name": "actions",
+        "start": 26,
+        "size": 10,
+        "source": "last_action",
+        "units": "policy action units",
+        "description": "the raw (unscaled, unclipped) action output by the previous policy step; zeros at start"
+      },
+      {
+        "name": "command",
+        "start": 36,
+        "size": 3,
+        "source": "command",
+        "units": "m/s, m/s, rad/s",
+        "description": "twist command [vx, vy, wz] in the torso heading frame"
+      },
+      {
+        "name": "gait_phase",
+        "start": 39,
+        "size": 2,
+        "source": "gait_phase",
+        "units": "-",
+        "description": "[sin(2 pi phi), cos(2 pi phi)] of the gait clock phase phi (see gait_clock)"
+      }
+    ]
+  },
+  "gait_clock": {
+    "period_s": 0.64,
+    "swing_fraction": 0.4,
+    "active_threshold": 0.05,
+    "active_rule": "active = (hypot(vx, vy) + abs(wz)) > active_threshold, evaluated on the command fed to the policy at this step",
+    "update_rule": "every policy step, BEFORE building the observation: if active: phi = (phi + policy_dt_s / period_s) mod 1; else phi unchanged (paused)",
+    "initial_phase": 0.0,
+    "observation": "gait_phase = [sin(2 pi phi), cos(2 pi phi)]",
+    "schedule": "left leg swings for phi in [0, swing_fraction), right leg for (phi + 0.5) mod 1 in [0, swing_fraction); otherwise stance; paused -> both stance"
+  },
+  "commands": {
+    "lin_vel_x_range": [
+      -0.3,
+      0.5
+    ],
+    "lin_vel_y_range": [
+      -0.2,
+      0.2
+    ],
+    "ang_vel_z_range": [
+      -1.0,
+      1.0
+    ],
+    "standing": "command [0, 0, 0] (gait clock pauses, both feet down)"
+  }
+}

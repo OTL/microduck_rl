@@ -280,16 +280,34 @@ for _task_id, _make_cfg, _kw, _rl_cfg, _robot_cfg in _BACKLASH_TASKS:
     )
 
 # QDD biped (a different robot: 5.66 kg, 10 QDD joints) — flat-ground velocity
-# tracking. Own obs layout (39-D actor), not part of the microduck 61-D family.
+# tracking. Own obs layout (41-D actor incl. gait clock), not part of the microduck 61-D family.
 from .qdd_biped_velocity_env_cfg import (
     make_qdd_biped_velocity_env_cfg,
+    policy_io_onnx_metadata as _qdd_policy_io_onnx_metadata,
     QddBipedRlCfg,
 )
+
+
+class QddBipedOnPolicyRunner(MicroduckOnPolicyRunner):
+    """Adds the policy I/O contract (robot/qdd_biped/policy_io.json) to the
+    ONNX the velocity runner writes next to every checkpoint."""
+
+    def save(self, path: str, infos=None):
+        super().save(path, infos)
+        _, _, onnx_path = self._get_export_paths(path)
+        try:
+            from mjlab.rl.exporter_utils import attach_metadata_to_onnx
+
+            if onnx_path.exists():
+                attach_metadata_to_onnx(str(onnx_path), _qdd_policy_io_onnx_metadata())
+        except Exception as e:  # never kill training over metadata
+            print(f"[WARN] policy_io ONNX metadata failed: {e}")
+
 
 register_mjlab_task(
     task_id="Mjlab-Velocity-Flat-QddBiped",
     env_cfg=make_qdd_biped_velocity_env_cfg(),
     play_env_cfg=make_qdd_biped_velocity_env_cfg(play=True),
     rl_cfg=QddBipedRlCfg,
-    runner_cls=MicroduckOnPolicyRunner,
+    runner_cls=QddBipedOnPolicyRunner,
 )
