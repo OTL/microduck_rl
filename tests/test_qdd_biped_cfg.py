@@ -64,7 +64,7 @@ def test_knee_max_torch_matches_robot_model():
     got = microduck_mdp.qdd_knee_max(torch.tensor(hp)).numpy()
     assert np.allclose(got, ref)
     # spot values from robot/model.py
-    assert math.isclose(knee_max(math.radians(10)), math.radians(85))
+    assert math.isclose(knee_max(math.radians(10)), math.radians(80))
     assert math.isclose(knee_max(math.radians(-50)), math.radians(120))
 
 

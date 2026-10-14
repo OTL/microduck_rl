@@ -139,5 +139,5 @@ def get_qdd_biped_robot_cfg() -> EntityCfg:
 def knee_max(hip_pitch_rad: float) -> float:
     """Pose-dependent knee limit [rad] — verbatim port of robot/model.py knee_max."""
     hp = math.degrees(hip_pitch_rad)
-    k = 85 if hp > 0 else 90 if hp > -15 else 100 if hp > -30 else 110 if hp > -45 else 120
+    k = 80 if hp > 0 else 90 if hp > -15 else 100 if hp > -30 else 110 if hp > -45 else 120
     return math.radians(k)
