@@ -39,7 +39,7 @@ def test_model_names_resolve():
     for s in ("imu_ang_vel", "imu_lin_vel", "root_angmom"):
         m.sensor(s)
     assert m.nu == 0  # actuators come from the mjlab cfg, not the XML
-    assert abs(m.body_subtreemass[1] - 6.359) < 0.01  # robot repo model, strengthened + GIM3510-8 ankle
+    assert abs(m.body_subtreemass[1] - 6.479) < 0.01  # robot repo model: strengthened, GIM3510-8 ankle, cable covers
 
 
 def test_stand_height_puts_soles_on_floor():

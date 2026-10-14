@@ -7677,13 +7677,13 @@ def roulade_lateral_velocity_penalty(
 # Pose-dependent knee limit: with the hip extended, a deeply folded knee brings
 # the ankle motor / heel into the roll motor and yaw bracket behind the hip.
 # Step function ported verbatim from robot/model.py knee_max():
-#   hip_pitch >   0 deg -> knee <=  85 deg
+#   hip_pitch >   0 deg -> knee <=  80 deg
 #   hip_pitch > -15 deg -> knee <=  90 deg
 #   hip_pitch > -30 deg -> knee <= 100 deg
 #   hip_pitch > -45 deg -> knee <= 110 deg
 #   otherwise           -> knee <= 120 deg (= the static joint range)
 # Breakpoints ordered from most negative so later (stricter) ones override.
-QDD_KNEE_MAX_STEPS_DEG = ((-45.0, 110.0), (-30.0, 100.0), (-15.0, 90.0), (0.0, 85.0))
+QDD_KNEE_MAX_STEPS_DEG = ((-45.0, 110.0), (-30.0, 100.0), (-15.0, 90.0), (0.0, 80.0))
 QDD_KNEE_MAX_FLOOR_DEG = 120.0
 _QDD_HIP_PITCH_JOINTS = ("l_hip_pitch", "r_hip_pitch")
 _QDD_KNEE_JOINTS = ("l_knee", "r_knee")
