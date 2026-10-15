@@ -44,6 +44,30 @@ from copy import deepcopy
 NUM_STEPS_PER_ENV = 24
 
 TURN_IN_PLACE_FRACTION = 0.15
+# Forward-only envs (vx in [0.3, 0.5], vy = wz = 0; mjlab rel_forward_envs). The
+# robot's main use is walking straight ahead; the template default was 0.2.
+FORWARD_ENVS_FRACTION = 0.3
+
+# Velocity tracking. The coarse kernel alone (std 0.25 m/s) still pays 70% of
+# the reward for 0.44 m/s at a 0.5 m/s command, and gait1 (nominal training
+# sim) settled there: 0.284 / 0.441 m/s at 0.3 / 0.5 commands. A second, fine
+# planar kernel (std 0.1 m/s: same miss -> 70% of it, 0.12 m/s miss -> 24%)
+# makes the last few cm/s worth more than the gait-shaping costs.
+LIN_VEL_STD = 0.25  # m/s, coarse (learning signal from the start)
+LIN_VEL_FINE_STD = 0.10  # m/s, fine (xy only: no penalty on the torso bob)
+LIN_VEL_FINE_WEIGHT = 1.5
+ANG_VEL_STD = 0.5  # rad/s (yaw rate already tracks: 0.81 at 0.8)
+
+# Play mode (export / yatai video): nominal robot, no DR / pushes / noise, and a
+# fixed readable command schedule ((t_start_s, vx, vy, wz), looping).
+PLAY_COMMAND_SCHEDULE = (
+    (0.0, 0.0, 0.0, 0.0),  # stand
+    (1.0, 0.3, 0.0, 0.0),  # walk
+    (5.0, 0.5, 0.0, 0.0),  # faster (top of the trained range)
+    (9.0, 0.0, 0.0, 0.8),  # turn in place (left)
+    (12.0, 0.0, 0.0, 0.0),  # stop
+)
+PLAY_SCHEDULE_PERIOD_S = 15.0
 
 # Commands (0.5 m robot, 0.13 m links)
 LIN_VEL_X_RANGE = (-0.3, 0.5)
@@ -86,7 +110,7 @@ GAIT_PERIOD_S = 0.64
 GAIT_SWING_FRACTION = 0.4  # per leg; 2 x (0.5 - 0.4) * period = 2 x 64 ms double support
 GAIT_ACTIVE_THRESHOLD = 0.05  # |v_xy| + |w_z| above this -> clock runs, else paused
 GAIT_SWING_HEIGHT = 0.05  # m sole clearance at mid-swing (sine profile)
-GAIT_HEIGHT_STD = 0.02  # m, swing-height tracking kernel
+GAIT_HEIGHT_STD = 0.03  # m, swing-height tracking kernel (0.02 left no gradient: gait1 swung 1.3 cm, not 5)
 FOOT_TARGET_HEIGHT = GAIT_SWING_HEIGHT  # mjlab foot_swing_height (peak at landing)
 FEET_LATERAL_SPACING = (0.08, 0.20)  # m, l-r sole offset in the heading frame (hips 0.13 apart)
 SYMMETRY_MIRROR_LOSS = True
@@ -197,6 +221,7 @@ def make_qdd_biped_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     command.viz.z_offset = 0.6
     cfg.commands["twist"] = microduck_mdp.VelocityCommandCommandOnlyCfg(**vars(command))
     cfg.commands["twist"].rel_turn_in_place_envs = TURN_IN_PLACE_FRACTION
+    cfg.commands["twist"].rel_forward_envs = FORWARD_ENVS_FRACTION
     # Gait clock: must come AFTER "twist" (reads the updated twist command).
     cfg.commands["gait"] = microduck_mdp.GaitClockCommandCfg(
         velocity_command_name="twist",
@@ -207,9 +232,14 @@ def make_qdd_biped_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
     # --- Rewards -----------------------------------------------------------------
     cfg.rewards["track_linear_velocity"].weight = 2.0
-    cfg.rewards["track_linear_velocity"].params["std"] = 0.25  # m/s
+    cfg.rewards["track_linear_velocity"].params["std"] = LIN_VEL_STD
+    cfg.rewards["track_linear_velocity_fine"] = RewardTermCfg(
+        func=microduck_mdp.track_lin_vel_xy_exp,
+        weight=LIN_VEL_FINE_WEIGHT,
+        params={"command_name": "twist", "std": LIN_VEL_FINE_STD},
+    )
     cfg.rewards["track_angular_velocity"].weight = 2.0
-    cfg.rewards["track_angular_velocity"].params["std"] = 0.5  # rad/s
+    cfg.rewards["track_angular_velocity"].params["std"] = ANG_VEL_STD
 
     cfg.rewards["upright"].params["asset_cfg"].body_names = (TORSO_BODY,)
     cfg.rewards["upright"].weight = 2.0
@@ -501,12 +531,52 @@ def make_qdd_biped_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
     # --- Play mode (export / video) ------------------------------------------------
     if play:
-        cfg.episode_length_s = int(1e9)
-        cfg.observations["actor"].enable_corruption = False
-        cfg.curriculum = {}
-        cfg.commands["twist"].rel_standing_envs = 0.1
+        _make_play_nominal(cfg)
 
     return cfg
+
+
+def _make_play_nominal(cfg: ManagerBasedRlEnvCfg) -> None:
+    """Play mode (scripts/export.py, yatai snapshots / video): the nominal robot
+    (no DR, pushes, obs noise / delay / IMU misalignment / encoder bias, fixed
+    mid-range command latency) following PLAY_COMMAND_SCHEDULE, so the video
+    shows the policy itself. Obs layout is unchanged (policy_io.json)."""
+    from dataclasses import replace
+
+    cfg.episode_length_s = int(1e9)
+    cfg.curriculum = {}
+    for name in (
+        "push_robot",
+        "base_com",
+        "encoder_bias",
+        "foot_friction",  # -> nominal 0.8 from the collision cfg
+        "randomize_mass_inertia",
+        "randomize_pd_gains",
+        "randomize_effort_limits",
+        "randomize_armature",
+        "randomize_joint_friction",
+    ):
+        cfg.events.pop(name, None)
+    actor = cfg.observations["actor"]
+    actor.enable_corruption = False
+    for term in actor.terms.values():
+        term.delay_min_lag = term.delay_max_lag = 0
+    for name in ("base_ang_vel", "projected_gravity"):
+        if "max_angle_deg" in actor.terms[name].params:
+            actor.terms[name].params["max_angle_deg"] = 0.0
+    actor.terms["joint_pos"].params["biased"] = False
+    robot = cfg.scene.entities["robot"]
+    art = robot.articulation  # module-level QDD_ARTICULATION: replace, never mutate
+    robot.articulation = replace(
+        art, actuators=tuple(replace(a, delay_min_lag=1, delay_max_lag=1) for a in art.actuators)
+    )
+
+    twist = cfg.commands["twist"]
+    cfg.commands["twist"] = microduck_mdp.ScheduledVelocityCommandCfg(
+        **vars(twist), schedule=PLAY_COMMAND_SCHEDULE, schedule_period_s=PLAY_SCHEDULE_PERIOD_S
+    )
+    cfg.commands["twist"].resampling_time_range = (1.0e9, 1.0e9)
+    cfg.commands["twist"].rel_standing_envs = 0.0
 
 
 QddBipedRlCfg = RslRlOnPolicyRunnerCfg(

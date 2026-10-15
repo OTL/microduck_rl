@@ -7949,3 +7949,80 @@ def joint_deviation_l2(
     q = asset.data.joint_pos[:, asset_cfg.joint_ids]
     q0 = asset.data.default_joint_pos[:, asset_cfg.joint_ids]
     return torch.nan_to_num(torch.sum(torch.square(q - q0), dim=1), nan=0.0)
+
+
+# --- Scripted twist command (play / video) ------------------------------------
+# Play-mode videos with random commands (and DR) make a good policy look bad and
+# are hard to read. This command follows a fixed, time-based schedule instead:
+# segment i = (t_start_s, vx, vy, wz) holds from t_start_s until the next start,
+# timed by the env's episode clock, looping every `schedule_period_s`. An empty
+# schedule = plain VelocityCommandCommandOnly (random resampling).
+
+
+class ScheduledVelocityCommand(VelocityCommandCommandOnly):
+    cfg: "ScheduledVelocityCommandCfg"
+
+    def __init__(self, cfg: "ScheduledVelocityCommandCfg", env: ManagerBasedRlEnv):
+        super().__init__(cfg, env)
+        if cfg.schedule:
+            starts = [float(s[0]) for s in cfg.schedule]
+            assert starts[0] == 0.0 and starts == sorted(starts), "schedule must start at 0, ascending"
+            assert cfg.schedule_period_s > starts[-1]
+        self._sched_t = torch.tensor([float(s[0]) for s in cfg.schedule], device=self.device)
+        self._sched_v = torch.tensor([[float(x) for x in s[1:4]] for s in cfg.schedule], device=self.device).reshape(-1, 3)
+
+    def scheduled(self, t: torch.Tensor) -> torch.Tensor:
+        """[B, 3] command at episode times t [B] (s)."""
+        tt = torch.remainder(t, self.cfg.schedule_period_s)
+        idx = torch.searchsorted(self._sched_t, tt.contiguous(), right=True) - 1
+        return self._sched_v[idx.clamp(min=0)]
+
+    def _apply_schedule(self, env_ids: torch.Tensor | None = None) -> None:
+        t = self._env.episode_length_buf.float() * self._env.step_dt
+        cmd = self.scheduled(t)
+        if env_ids is None:
+            self.vel_command_b[:] = cmd
+            self.vel_command_w[:] = cmd
+            self.is_standing_env[:] = False
+        else:
+            self.vel_command_b[env_ids] = cmd[env_ids]
+            self.vel_command_w[env_ids] = cmd[env_ids]
+            self.is_standing_env[env_ids] = False
+
+    def _resample_command(self, env_ids: torch.Tensor) -> None:
+        if not self.cfg.schedule:
+            return super()._resample_command(env_ids)
+        self._apply_schedule(env_ids)
+
+    def _update_command(self) -> None:
+        if not self.cfg.schedule:
+            return super()._update_command()
+        self._apply_schedule()
+
+
+@_dataclass(kw_only=True)
+class ScheduledVelocityCommandCfg(VelocityCommandCommandOnlyCfg):
+    # ((t_start_s, vx, vy, wz), ...), first t_start_s = 0. Empty = random commands.
+    schedule: tuple = ()
+    # Loop length (s); must exceed the last segment start.
+    schedule_period_s: float = 1.0e9
+
+    def build(self, env: ManagerBasedRlEnv) -> "ScheduledVelocityCommand":
+        return ScheduledVelocityCommand(self, env)
+
+
+def track_lin_vel_xy_exp(
+    env: ManagerBasedRlEnv,
+    std: float,
+    command_name: str,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """REWARD in [0, 1]: exp(-|v_cmd_xy - v_xy|^2 / std^2), body-frame xy only.
+
+    mjlab's track_linear_velocity also counts the vertical velocity, which a
+    tight kernel would turn into a penalty on the natural torso bob of a
+    stepping gait; this one only looks at the planar velocity."""
+    asset: Entity = env.scene[asset_cfg.name]
+    command = env.command_manager.get_command(command_name)
+    err = torch.sum(torch.square(command[:, :2] - asset.data.root_link_lin_vel_b[:, :2]), dim=1)
+    return torch.nan_to_num(torch.exp(-err / std**2), nan=0.0)

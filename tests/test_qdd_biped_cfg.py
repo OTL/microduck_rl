@@ -139,6 +139,56 @@ def test_terminations_and_play_mode():
     assert play.curriculum == {}
 
 
+def test_play_mode_is_nominal():
+    """Play (export / video) = the nominal robot: no DR events, no obs noise,
+    delay or IMU misalignment, fixed command latency, scripted commands."""
+    from mjlab_microduck.robot.qdd_biped_constants import QDD_ARTICULATION
+    from mjlab_microduck.tasks.qdd_biped_velocity_env_cfg import PLAY_COMMAND_SCHEDULE
+
+    train = make_qdd_biped_velocity_env_cfg()
+    play = make_qdd_biped_velocity_env_cfg(play=True)
+    assert {"base_com", "encoder_bias", "foot_friction", "randomize_pd_gains"} <= set(train.events)
+    assert set(play.events) <= {"reset_base", "reset_robot_joints"}, set(play.events)
+    actor = play.observations["actor"]
+    assert actor.enable_corruption is False
+    assert all(t.delay_max_lag == 0 for t in actor.terms.values())
+    assert actor.terms["projected_gravity"].params["max_angle_deg"] == 0.0
+    assert actor.terms["joint_pos"].params["biased"] is False
+    assert all(a.delay_min_lag == a.delay_max_lag == 1 for a in play.scene.entities["robot"].articulation.actuators)
+    # the shared module-level actuator cfgs are untouched (training keeps 0-2)
+    assert all(a.delay_max_lag == 2 for a in QDD_ARTICULATION.actuators)
+    assert play.commands["twist"].schedule == PLAY_COMMAND_SCHEDULE
+    assert train.commands["twist"].rel_forward_envs > 0
+    assert "track_linear_velocity_fine" in train.rewards
+
+
+def test_play_command_schedule_in_env():
+    from mjlab.envs import ManagerBasedRlEnv
+    from mjlab_microduck.tasks.qdd_biped_velocity_env_cfg import PLAY_COMMAND_SCHEDULE
+
+    cfg = make_qdd_biped_velocity_env_cfg(play=True)
+    cfg.scene.num_envs = 1
+    env = ManagerBasedRlEnv(cfg=cfg, device="cpu")
+    try:
+        env.reset()
+        twist = env.command_manager.get_term("twist")
+        gait = env.command_manager.get_term("gait")
+        act = torch.zeros(1, 10)
+        seen = {}
+        for _ in range(round(13.0 / env.step_dt)):
+            obs, *_ = env.step(act)
+            t = round(float(env.episode_length_buf[0]) * env.step_dt, 6)
+            seen[t] = (twist.command[0].tolist(), bool(gait.active[0]))
+            assert torch.allclose(obs["actor"][0, 36:39], twist.command[0])
+        for t0, vx, vy, wz in PLAY_COMMAND_SCHEDULE:
+            t = round(t0 + 0.5, 6)
+            if t in seen:
+                assert seen[t][0] == pytest.approx([vx, vy, wz]), t
+                assert seen[t][1] == (abs(vx) + abs(wz) > 0), t
+    finally:
+        env.close()
+
+
 def test_rl_cfg():
     assert QddBipedRlCfg.experiment_name == "qdd_biped_velocity"
     assert QddBipedRlCfg.actor.obs_normalization is True
@@ -207,6 +257,7 @@ def live_env():
 
     cfg = make_qdd_biped_velocity_env_cfg(play=True)
     cfg.scene.num_envs = 2
+    cfg.commands["twist"].schedule = ()  # tests drive the twist command by hand
     env = ManagerBasedRlEnv(cfg=cfg, device="cpu")
     yield env
     env.close()
