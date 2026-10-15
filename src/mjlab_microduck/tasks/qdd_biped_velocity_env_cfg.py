@@ -55,8 +55,14 @@ FORWARD_ENVS_FRACTION = 0.3
 # makes the last few cm/s worth more than the gait-shaping costs.
 LIN_VEL_STD = 0.25  # m/s, coarse (learning signal from the start)
 LIN_VEL_FINE_STD = 0.10  # m/s, fine (xy only: no penalty on the torso bob)
-LIN_VEL_FINE_WEIGHT = 1.5
-ANG_VEL_STD = 0.5  # rad/s (yaw rate already tracks: 0.81 at 0.8)
+# gait3: 1.5 -> 1.2 (gait2 tracked 0.306 / 0.500 but shuffled its feet: the
+# fine kernel out-earned the swing-height term).
+LIN_VEL_FINE_WEIGHT = 1.2
+ANG_VEL_STD = 0.5  # rad/s, coarse
+# Fine yaw-rate kernel (gait3): gait2 turned in place at 0.70 rad/s for 0.8,
+# which the coarse kernel still paid 96% for.
+ANG_VEL_FINE_STD = 0.15  # rad/s
+ANG_VEL_FINE_WEIGHT = 1.0
 
 # Play mode (export / yatai video): nominal robot, no DR / pushes / noise, and a
 # fixed readable command schedule ((t_start_s, vx, vy, wz), looping).
@@ -111,6 +117,24 @@ GAIT_SWING_FRACTION = 0.4  # per leg; 2 x (0.5 - 0.4) * period = 2 x 64 ms doubl
 GAIT_ACTIVE_THRESHOLD = 0.05  # |v_xy| + |w_z| above this -> clock runs, else paused
 GAIT_SWING_HEIGHT = 0.05  # m sole clearance at mid-swing (sine profile)
 GAIT_HEIGHT_STD = 0.03  # m, swing-height tracking kernel (0.02 left no gradient: gait1 swung 1.3 cm, not 5)
+GAIT_SWING_HEIGHT_WEIGHT = 2.0  # gait3: 1.0 -> 2.0 (gait2 swung 0.6 cm on average)
+# One-sided minimum clearance during swing: min * sin(pi * progress), linear
+# cost on the shortfall (3 cm short at mid-swing -> 0.3/step).
+GAIT_MIN_CLEARANCE = 0.035  # m
+GAIT_MIN_CLEARANCE_WEIGHT = -10.0
+# Square stance at a stop (gait clock paused): feet side by side, equal hip
+# pitch, equal load, default pose. gait2 stopped mid-stride (hip pitch 0.18 rad
+# apart) and a bow started from there yawed ~7 deg.
+STAND_SQUARE_WEIGHT = 2.0
+STAND_OFFSET_STD = 0.02  # m, fore-aft l-r sole offset
+STAND_HIP_PITCH_STD = 0.05  # rad, l-r hip pitch difference
+STAND_LOAD_STD = 0.15  # left share of the sole force vs 0.5
+STAND_POSE_STD = 0.2  # sqrt(sum of squared joint deviations), rad
+# The clock stops wherever the stride was (the controller does the same: it
+# only advances while the command is active), so for this long after a stop
+# the contact schedule does not insist on both feet down: one settling step
+# is allowed.
+GAIT_STOP_SETTLE_S = 0.6
 FOOT_TARGET_HEIGHT = GAIT_SWING_HEIGHT  # mjlab foot_swing_height (peak at landing)
 FEET_LATERAL_SPACING = (0.08, 0.20)  # m, l-r sole offset in the heading frame (hips 0.13 apart)
 SYMMETRY_MIRROR_LOSS = True
@@ -240,6 +264,11 @@ def make_qdd_biped_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     )
     cfg.rewards["track_angular_velocity"].weight = 2.0
     cfg.rewards["track_angular_velocity"].params["std"] = ANG_VEL_STD
+    cfg.rewards["track_angular_velocity_fine"] = RewardTermCfg(
+        func=microduck_mdp.track_ang_vel_z_exp,
+        weight=ANG_VEL_FINE_WEIGHT,
+        params={"command_name": "twist", "std": ANG_VEL_FINE_STD},
+    )
 
     cfg.rewards["upright"].params["asset_cfg"].body_names = (TORSO_BODY,)
     cfg.rewards["upright"].weight = 2.0
@@ -279,14 +308,32 @@ def make_qdd_biped_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.rewards["gait_contact"] = RewardTermCfg(
         func=microduck_mdp.gait_contact_schedule,
         weight=1.5,
-        params={"sensor_name": feet_ground_cfg.name, "command_name": "gait"},
+        params={"sensor_name": feet_ground_cfg.name, "command_name": "gait", "settle_s": GAIT_STOP_SETTLE_S},
     )
     cfg.rewards["gait_swing_height"] = RewardTermCfg(
         func=microduck_mdp.gait_foot_height_tracking,
-        weight=1.0,
+        weight=GAIT_SWING_HEIGHT_WEIGHT,
         params={
             "swing_height": GAIT_SWING_HEIGHT,
             "std": GAIT_HEIGHT_STD,
+            "command_name": "gait",
+            "asset_cfg": deepcopy(feet),
+        },
+    )
+    cfg.rewards["swing_clearance"] = RewardTermCfg(
+        func=microduck_mdp.gait_swing_clearance_deficit,
+        weight=GAIT_MIN_CLEARANCE_WEIGHT,
+        params={"min_height": GAIT_MIN_CLEARANCE, "command_name": "gait", "asset_cfg": deepcopy(feet)},
+    )
+    cfg.rewards["stand_square"] = RewardTermCfg(
+        func=microduck_mdp.stand_square_stance,
+        weight=STAND_SQUARE_WEIGHT,
+        params={
+            "sensor_name": feet_ground_cfg.name,
+            "offset_std": STAND_OFFSET_STD,
+            "hip_pitch_std": STAND_HIP_PITCH_STD,
+            "load_std": STAND_LOAD_STD,
+            "pose_std": STAND_POSE_STD,
             "command_name": "gait",
             "asset_cfg": deepcopy(feet),
         },

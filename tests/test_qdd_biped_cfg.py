@@ -90,6 +90,8 @@ def test_reward_signs():
         "pose",
         "gait_contact",
         "gait_swing_height",
+        "track_angular_velocity_fine",
+        "stand_square",
     ):
         assert r[name].weight > 0, name
     # replaced by the gait clock terms
@@ -106,6 +108,7 @@ def test_reward_signs():
         "touchdown_velocity",
         "feet_spacing",
         "hip_yaw_roll",
+        "swing_clearance",
         "body_ang_vel",
         "dof_pos_limits",
     ):
@@ -329,3 +332,117 @@ def test_standing_robot_satisfies_gait_terms(live_env):
     assert torch.all(h > 0.95)
     assert torch.all(microduck_mdp.feet_tilt_near_ground(env, "feet_ground_contact", asset_cfg=feet) < 0.01)
     assert torch.all(microduck_mdp.feet_lateral_spacing(env, 0.08, 0.20, asset_cfg=feet) == 0.0)
+
+
+# --- gait3 terms: swing clearance, fine yaw tracking, square stance at a stop --
+
+
+def _feet(env):
+    from mjlab.managers.scene_entity_config import SceneEntityCfg
+
+    feet = SceneEntityCfg("robot", site_names=FOOT_SITES)
+    feet.resolve(env.scene)
+    return feet
+
+
+def _stand(env, steps=25):
+    twist = env.command_manager.get_term("twist")
+    act = torch.zeros(env.num_envs, 10)
+    for _ in range(steps):
+        twist.is_standing_env[:] = True
+        twist.time_left[:] = 100.0
+        env.step(act)
+
+
+def test_stand_time_counts_while_paused(live_env):
+    env = live_env
+    env.reset()
+    gait = env.command_manager.get_term("gait")
+    twist = env.command_manager.get_term("twist")
+    act = torch.zeros(env.num_envs, 10)
+    twist.vel_command_b[0] = torch.tensor([0.3, 0.0, 0.0])
+    twist.is_standing_env[0] = False
+    twist.is_standing_env[1] = True
+    twist.time_left[:] = 100.0
+    env.step(act)
+    assert gait.stand_time[0] == 0.0
+    t1 = float(gait.stand_time[1])
+    twist.vel_command_b[0] = 0.0
+    twist.is_standing_env[0] = True
+    for k in range(3):
+        env.step(act)
+        assert gait.stand_time[0] == pytest.approx((k + 1) * env.step_dt)
+    assert gait.stand_time[1] > t1
+
+
+def test_contact_schedule_settle_window(live_env):
+    """Right after a stop any contact pattern is fine (one settling step);
+    after the window both feet must be down again."""
+    env = live_env
+    _stand(env)
+    gait = env.command_manager.get_term("gait")
+    sensor = env.scene["feet_ground_contact"]
+    sensor.data.found[:, 0] = 0  # pretend the left foot is lifted
+    gait.stand_time[:] = 0.1
+    assert torch.all(microduck_mdp.gait_contact_schedule(env, "feet_ground_contact", settle_s=0.6) == 1.0)
+    gait.stand_time[:] = 1.0
+    assert torch.all(microduck_mdp.gait_contact_schedule(env, "feet_ground_contact", settle_s=0.6) == 0.5)
+    assert torch.all(microduck_mdp.gait_contact_schedule(env, "feet_ground_contact") == 0.5)
+
+
+def test_swing_clearance_deficit(live_env):
+    env = live_env
+    _stand(env)
+    feet = _feet(env)
+    # standing: nothing swings -> no cost
+    assert torch.all(microduck_mdp.gait_swing_clearance_deficit(env, 0.035, asset_cfg=feet) == 0.0)
+    # walking at phase 0.2 = left leg at mid-swing while its sole is on the floor
+    gait = env.command_manager.get_term("gait")
+    gait.active[:] = True
+    gait.phase[:, 0] = 0.2
+    c = microduck_mdp.gait_swing_clearance_deficit(env, 0.035, asset_cfg=feet)
+    assert torch.allclose(c, torch.full_like(c, 0.035), atol=2e-3)
+    # half a period later the right leg is the one at mid-swing
+    gait.phase[:, 0] = 0.7
+    c = microduck_mdp.gait_swing_clearance_deficit(env, 0.035, asset_cfg=feet)
+    assert torch.allclose(c, torch.full_like(c, 0.035), atol=2e-3)
+    gait.active[:] = False
+
+
+def test_fine_yaw_tracking(live_env):
+    env = live_env
+    _stand(env)
+    twist = env.command_manager.get_term("twist")
+    r0 = microduck_mdp.track_ang_vel_z_exp(env, 0.15, "twist")
+    assert torch.all(r0 > 0.9)
+    twist.vel_command_b[:, 2] = 0.8
+    r1 = microduck_mdp.track_ang_vel_z_exp(env, 0.15, "twist")
+    assert torch.all(r1 < 1e-6)
+    # 10% short of 0.8 rad/s still loses a fifth of the fine reward
+    assert math.exp(-(0.08 / 0.15) ** 2) < 0.8
+    twist.vel_command_b[:, 2] = 0.0
+
+
+def test_stand_square_rewards_square_stance_only(live_env):
+    env = live_env
+    _stand(env, steps=50)
+    feet = _feet(env)
+    kw = dict(offset_std=0.02, hip_pitch_std=0.05, load_std=0.15, pose_std=0.2, asset_cfg=feet)
+    r_square = microduck_mdp.stand_square_stance(env, "feet_ground_contact", **kw)
+    assert torch.all(r_square > 0.8), r_square
+    # staggered (mid-stride) stance: hips 0.2 rad apart, feet ~5 cm apart fore-aft
+    robot = env.scene["robot"]
+    ids, _ = robot.find_joints(("l_hip_pitch", "r_hip_pitch"), preserve_order=True)
+    q = robot.data.joint_pos.clone()
+    q[:, ids[0]] -= 0.1
+    q[:, ids[1]] += 0.1
+    robot.write_joint_state_to_sim(q, torch.zeros_like(q))
+    env.sim.forward()
+    r_stagger = microduck_mdp.stand_square_stance(env, "feet_ground_contact", **kw)
+    assert torch.all(r_stagger < r_square - 0.3), (r_stagger, r_square)
+    # walking envs: not paid
+    gait = env.command_manager.get_term("gait")
+    gait.active[:] = True
+    assert torch.all(microduck_mdp.stand_square_stance(env, "feet_ground_contact", **kw) == 0.0)
+    gait.active[:] = False
+    env.reset()

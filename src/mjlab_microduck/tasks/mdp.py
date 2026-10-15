@@ -7765,6 +7765,9 @@ class GaitClockCommand(CommandTerm):
         super().__init__(cfg, env)
         self.phase = torch.zeros(self.num_envs, 1, device=self.device)
         self.active = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        # Seconds since the clock paused (0 while walking). Not observed: only
+        # the stop-settling window of the rewards uses it.
+        self.stand_time = torch.full((self.num_envs,), 1.0e3, device=self.device)
         self._dt = env.step_dt
 
     @property
@@ -7781,10 +7784,12 @@ class GaitClockCommand(CommandTerm):
             self.phase[env_ids, 0] = torch.rand(len(env_ids), device=self.device)
         else:
             self.phase[env_ids, 0] = 0.0
+        self.stand_time[env_ids] = 1.0e3  # spawned in the (square) default pose
 
     def _update_command(self) -> None:
         twist = self._env.command_manager.get_command(self.cfg.velocity_command_name)
         self.active = qdd_gait_active(twist, self.cfg.active_threshold)
+        self.stand_time = torch.where(self.active, torch.zeros_like(self.stand_time), self.stand_time + self._dt)
         step = self._dt / self.cfg.period_s
         self.phase[:, 0] = torch.where(
             self.active, torch.remainder(self.phase[:, 0] + step, 1.0), self.phase[:, 0]
@@ -7834,16 +7839,24 @@ def gait_contact_schedule(
     env: ManagerBasedRlEnv,
     sensor_name: str,
     command_name: str = "gait",
+    settle_s: float = 0.0,
 ) -> torch.Tensor:
     """REWARD in [0, 1]: fraction of feet whose ground contact matches the clock
-    (swing -> in the air, stance / standing -> on the ground)."""
+    (swing -> in the air, stance / standing -> on the ground).
+
+    For ``settle_s`` after the clock pauses (command -> 0) any contact pattern
+    counts as matched: the clock stops wherever the stride was (the controller
+    does the same), and squaring up the feet may need one settling step."""
     from mjlab.sensor import ContactSensor
 
     sensor: ContactSensor = env.scene[sensor_name]
     assert sensor.data.found is not None
     contact = sensor.data.found > 0  # [B, 2] (l, r)
-    swing, _, _ = qdd_gait_schedule(env, command_name)
+    swing, _, active = qdd_gait_schedule(env, command_name)
     match = (contact != swing).float()
+    if settle_s > 0.0:
+        settling = (~active) & (_qdd_gait(env, command_name).stand_time < settle_s)
+        match = torch.where(settling.unsqueeze(1), torch.ones_like(match), match)
     return match.mean(dim=1)
 
 
@@ -7864,6 +7877,94 @@ def gait_foot_height_tracking(
     sw = swing.float()
     env.extras["log"]["Metrics/swing_foot_height_mean"] = (h * sw).sum() / torch.clamp(sw.sum(), min=1.0)
     return torch.nan_to_num(torch.exp(-err / std**2).mean(dim=1), nan=0.0)
+
+
+def gait_swing_clearance_deficit(
+    env: ManagerBasedRlEnv,
+    min_height: float,
+    command_name: str = "gait",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """COST (>= 0, m): how far each swing foot is BELOW the minimum clearance
+    profile min_height * sin(pi * swing_progress), summed over feet. One-sided
+    (a higher swing is free; gait_swing_height shapes the apex): stops the
+    shuffling gait (gait2 swung 0.6 cm on average for a 5 cm target), where the
+    Gaussian tracking kernel alone gives little gradient."""
+    asset: Entity = env.scene[asset_cfg.name]
+    h = asset.data.site_pos_w[:, asset_cfg.site_ids, 2]  # [B, 2]
+    swing, progress, _ = qdd_gait_schedule(env, command_name)
+    h_min = min_height * torch.sin(math.pi * progress)
+    deficit = torch.clamp(h_min - h, min=0.0) * swing.float()
+    return torch.nan_to_num(deficit.sum(dim=1), nan=0.0)
+
+
+def track_ang_vel_z_exp(
+    env: ManagerBasedRlEnv,
+    std: float,
+    command_name: str,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """REWARD in [0, 1]: exp(-(wz_cmd - wz)^2 / std^2), body-frame yaw rate only
+    (fine kernel next to mjlab's coarse track_angular_velocity: gait2 turned in
+    place at 0.70 rad/s for a 0.8 command)."""
+    asset: Entity = env.scene[asset_cfg.name]
+    command = env.command_manager.get_command(command_name)
+    err = torch.square(command[:, 2] - asset.data.root_link_ang_vel_b[:, 2])
+    return torch.nan_to_num(torch.exp(-err / std**2), nan=0.0)
+
+
+def stand_square_stance(
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    offset_std: float,
+    hip_pitch_std: float,
+    load_std: float,
+    pose_std: float,
+    command_name: str = "gait",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """REWARD in [0, 1], only while the gait clock is paused (command ~ 0):
+    mean of four Gaussian kernels for a square, settled stance
+      - fore-aft sole offset l - r along the heading x axis -> 0,
+      - left-right hip-pitch difference -> 0,
+      - equal load (left share of the total sole contact force -> 0.5; 0 if
+        neither foot is down),
+      - joint pose -> default (sum of squared deviations, rad^2).
+    Walking envs get 0. gait2 stopped wherever the stride was (hip pitch 0.18
+    rad apart), and a skill started from that stance yawed ~7 deg."""
+    from mjlab.sensor import ContactSensor
+
+    asset: Entity = env.scene[asset_cfg.name]
+    sensor: ContactSensor = env.scene[sensor_name]
+    gait = _qdd_gait(env, command_name)
+    standing = (~gait.active).float()
+
+    p = asset.data.site_pos_w[:, asset_cfg.site_ids, :2]  # [B, 2(l,r), 2]
+    d = p[:, 0] - p[:, 1]
+    yaw = asset.data.heading_w
+    dx = torch.cos(yaw) * d[:, 0] + torch.sin(yaw) * d[:, 1]
+    r_offset = torch.exp(-torch.square(dx) / offset_std**2)
+
+    ids = getattr(env, "_qdd_hip_pitch_ids", None)
+    if ids is None:
+        ids, _ = asset.find_joints(_QDD_HIP_PITCH_JOINTS, preserve_order=True)
+        env._qdd_hip_pitch_ids = ids
+    q = asset.data.joint_pos
+    dhp = q[:, ids[0]] - q[:, ids[1]]
+    r_hip = torch.exp(-torch.square(dhp) / hip_pitch_std**2)
+
+    assert sensor.data.force is not None
+    f = torch.norm(sensor.data.force, dim=-1)  # [B, 2]
+    total = f.sum(dim=1)
+    share = f[:, 0] / torch.clamp(total, min=1e-6)
+    r_load = torch.where(total > 1.0, torch.exp(-torch.square(share - 0.5) / load_std**2), torch.zeros_like(total))
+
+    dev = torch.sum(torch.square(q - asset.data.default_joint_pos), dim=1)
+    r_pose = torch.exp(-dev / pose_std**2)
+
+    r = (r_offset + r_hip + r_load + r_pose) / 4.0
+    env.extras["log"]["Metrics/stand_foot_offset_x"] = (dx.abs() * standing).sum() / torch.clamp(standing.sum(), min=1.0)
+    return torch.nan_to_num(r * standing, nan=0.0)
 
 
 def feet_tilt_near_ground(
