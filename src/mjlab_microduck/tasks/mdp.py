@@ -8026,3 +8026,271 @@ def track_lin_vel_xy_exp(
     command = env.command_manager.get_command(command_name)
     err = torch.sum(torch.square(command[:, :2] - asset.data.root_link_lin_vel_b[:, :2]), dim=1)
     return torch.nan_to_num(torch.exp(-err / std**2), nan=0.0)
+
+
+
+# =============================================================================
+# QDD biped skills (Mjlab-Skill-QddBiped): keyframe tracking from a JSON spec
+# =============================================================================
+# The skill spec (tasks/qdd_skill.py) is turned into a dense reference at the
+# policy rate (joint targets, torso pitch / roll / height, torso orientation with
+# the soles flat). SkillClockCommand owns it: skill step k = episode step + k0
+# (k0 > 0 for reference-state-initialised episodes), phase s = k / n in [0, 1].
+# The policy sees the phase in the walking policy's gait_phase slot as
+# [sin(pi s), cos(pi s)] (policy_io.json "skill"), and zeros in the command slot.
+
+
+class ZeroTwistCommand(CommandTerm):
+    """Twist command that is always [0, 0, 0] (keeps the walking obs layout)."""
+
+    cfg: "ZeroTwistCommandCfg"
+
+    def __init__(self, cfg: "ZeroTwistCommandCfg", env: ManagerBasedRlEnv):
+        super().__init__(cfg, env)
+        self._zeros = torch.zeros(self.num_envs, 3, device=self.device)
+
+    @property
+    def command(self) -> torch.Tensor:
+        return self._zeros
+
+    def _update_metrics(self) -> None:
+        pass
+
+    def _resample_command(self, env_ids: torch.Tensor) -> None:
+        pass
+
+    def _update_command(self) -> None:
+        pass
+
+
+@_dataclass(kw_only=True)
+class ZeroTwistCommandCfg(CommandTermCfg):
+    resampling_time_range: tuple[float, float] = (1.0e9, 1.0e9)
+
+    def build(self, env: ManagerBasedRlEnv) -> ZeroTwistCommand:
+        return ZeroTwistCommand(self, env)
+
+
+class SkillClockCommand(CommandTerm):
+    """Skill reference + clock. ``command`` = phase s in [0, 1], shape [B, 1].
+
+    Reference-state initialisation (RSI): at reset a fraction ``rsi_fraction`` of
+    the envs start at a random skill step k0 in the reference pose (joints, torso
+    height and orientation with flat soles, reference joint velocity); the rest
+    start at k0 = 0 from the standing pose, like on the robot."""
+
+    cfg: "SkillClockCommandCfg"
+
+    def __init__(self, cfg: "SkillClockCommandCfg", env: ManagerBasedRlEnv):
+        super().__init__(cfg, env)
+        from mjlab_microduck.tasks import qdd_skill
+
+        self.spec = qdd_skill.load_spec_text(cfg.spec_text, cfg.spec_source)
+        ref = qdd_skill.build_reference(self.spec, dt=env.step_dt)
+        dev = self.device
+
+        def f(a):
+            return torch.tensor(np.asarray(a), dtype=torch.float32, device=dev)
+
+        self.n = len(ref["t"]) - 1  # last valid index (= total / dt)
+        self.ref_q = f(ref["q"])  # [n+1, 10] absolute, QDD_JOINT_NAMES order
+        self.ref_dq = torch.zeros_like(self.ref_q)
+        self.ref_dq[1:-1] = (self.ref_q[2:] - self.ref_q[:-2]) / (2.0 * env.step_dt)
+        self.ref_pitch = f(ref["pitch"])
+        self.ref_roll = f(ref["roll"])
+        self.ref_height = f(ref["height"])
+        self.ref_quat = f(ref["quat"])
+        self.in_skill = torch.tensor(ref["in_skill"], dtype=torch.bool, device=dev)
+        self.k0 = torch.zeros(self.num_envs, dtype=torch.long, device=dev)
+        self.asset: Entity = env.scene[cfg.asset_name]
+        from mjlab_microduck.robot.qdd_biped_constants import QDD_JOINT_NAMES
+
+        ids, _ = self.asset.find_joints(QDD_JOINT_NAMES, preserve_order=True)
+        self.joint_ids = torch.tensor(ids, dtype=torch.long, device=dev)
+
+    # --- clock -----------------------------------------------------------------
+    @property
+    def step_index(self) -> torch.Tensor:
+        """[B] skill step k (clamped to the reference length)."""
+        k = self._env.episode_length_buf.long() + self.k0
+        return torch.clamp(k, 0, self.n)
+
+    @property
+    def phase(self) -> torch.Tensor:
+        return (self.step_index.float() / self.n).unsqueeze(1)
+
+    @property
+    def command(self) -> torch.Tensor:
+        return self.phase
+
+    def done(self) -> torch.Tensor:
+        return (self._env.episode_length_buf.long() + self.k0) >= self.n
+
+    # --- reference at the current step -----------------------------------------
+    def q_ref(self) -> torch.Tensor:
+        return self.ref_q[self.step_index]
+
+    def torso_ref(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        k = self.step_index
+        return self.ref_pitch[k], self.ref_roll[k], self.ref_height[k]
+
+    def settling(self) -> torch.Tensor:
+        """[B] bool: past the motion, in the return-to-stand phase."""
+        return ~self.in_skill[self.step_index]
+
+    def joint_pos(self) -> torch.Tensor:
+        return self.asset.data.joint_pos[:, self.joint_ids]
+
+    def _update_metrics(self) -> None:
+        pass
+
+    def _update_command(self) -> None:
+        pass
+
+    def _resample_command(self, env_ids: torch.Tensor) -> None:
+        n_env = len(env_ids)
+        k0 = torch.zeros(n_env, dtype=torch.long, device=self.device)
+        if self.cfg.rsi_fraction > 0.0 and n_env > 0:
+            use = torch.rand(n_env, device=self.device) < self.cfg.rsi_fraction
+            k0 = torch.where(use, torch.randint(1, self.n, (n_env,), device=self.device), k0)
+        self.k0[env_ids] = k0
+        rsi = env_ids[k0 > 0]
+        if len(rsi) == 0:
+            return
+        from mjlab.utils.lab_api.math import quat_mul, yaw_quat
+
+        k = self.k0[rsi]
+        asset = self.asset
+        q = asset.data.joint_pos[rsi].clone()
+        dq = torch.zeros_like(q)
+        q[:, self.joint_ids] = self.ref_q[k]
+        dq[:, self.joint_ids] = self.ref_dq[k]
+        asset.write_joint_state_to_sim(q, dq, env_ids=rsi)
+        root = torch.zeros(len(rsi), 13, device=self.device)
+        root[:, 0:2] = asset.data.root_link_pos_w[rsi, 0:2]
+        root[:, 2] = self.ref_height[k] + self.cfg.rsi_height_offset
+        root[:, 3:7] = quat_mul(yaw_quat(asset.data.root_link_quat_w[rsi]), self.ref_quat[k])
+        asset.write_root_state_to_sim(root, env_ids=rsi)
+
+
+@_dataclass(kw_only=True)
+class SkillClockCommandCfg(CommandTermCfg):
+    resampling_time_range: tuple[float, float] = (1.0e9, 1.0e9)  # reset only
+    spec_text: str = ""  # validated skill JSON (qdd_skill.load_spec_text)
+    spec_source: str = "<cfg>"
+    asset_name: str = "robot"
+    rsi_fraction: float = 0.3
+    rsi_height_offset: float = 0.003  # m, spawn the soles just above the floor
+
+    def build(self, env: ManagerBasedRlEnv) -> SkillClockCommand:
+        return SkillClockCommand(self, env)
+
+
+def _qdd_skill(env: ManagerBasedRlEnv, command_name: str) -> SkillClockCommand:
+    term = env.command_manager.get_term(command_name)
+    assert isinstance(term, SkillClockCommand)
+    return term
+
+
+def skill_phase_obs(env: ManagerBasedRlEnv, command_name: str = "skill") -> torch.Tensor:
+    """[sin(pi s), cos(pi s)], s = skill phase in [0, 1] (policy_io.json gait_phase slot)."""
+    ang = math.pi * _qdd_skill(env, command_name).phase
+    return torch.cat((torch.sin(ang), torch.cos(ang)), dim=1)
+
+
+def _torso_pitch_roll(asset: Entity) -> tuple[torch.Tensor, torch.Tensor]:
+    """Torso pitch (+ nose down) / roll (+ left side up) from projected gravity
+    (same convention as qdd_skill.pitch_roll_from_gravity)."""
+    g = asset.data.projected_gravity_b
+    return torch.atan2(g[:, 0], -g[:, 2]), torch.atan2(-g[:, 1], -g[:, 2])
+
+
+def skill_joint_tracking(env: ManagerBasedRlEnv, std: float, command_name: str = "skill") -> torch.Tensor:
+    """REWARD in [0, 1]: exp(-mean_j (q_j - q_ref_j)^2 / std^2)."""
+    sk = _qdd_skill(env, command_name)
+    err = torch.mean(torch.square(sk.joint_pos() - sk.q_ref()), dim=1)
+    env.extras["log"]["Metrics/skill_joint_rmse_deg"] = torch.rad2deg(torch.sqrt(torch.nan_to_num(err).mean()))
+    return torch.nan_to_num(torch.exp(-err / std**2), nan=0.0)
+
+
+def skill_torso_orientation(env: ManagerBasedRlEnv, std: float, command_name: str = "skill") -> torch.Tensor:
+    """REWARD in [0, 1]: torso pitch / roll vs. the reference (flat-sole kinematics)."""
+    sk = _qdd_skill(env, command_name)
+    pitch, roll = _torso_pitch_roll(sk.asset)
+    p_ref, r_ref, _ = sk.torso_ref()
+    err = torch.square(pitch - p_ref) + torch.square(roll - r_ref)
+    log = env.extras["log"]
+    log["Metrics/skill_pitch_err_deg"] = torch.rad2deg(torch.nan_to_num(torch.abs(pitch - p_ref)).mean())
+    return torch.nan_to_num(torch.exp(-err / std**2), nan=0.0)
+
+
+def skill_torso_height(env: ManagerBasedRlEnv, std: float, command_name: str = "skill") -> torch.Tensor:
+    """REWARD in [0, 1]: torso origin height (flat ground) vs. the reference."""
+    sk = _qdd_skill(env, command_name)
+    _, _, h_ref = sk.torso_ref()
+    err = torch.square(sk.asset.data.root_link_pos_w[:, 2] - h_ref)
+    return torch.nan_to_num(torch.exp(-err / std**2), nan=0.0)
+
+
+def skill_balance(
+    env: ManagerBasedRlEnv,
+    lin_std: float,
+    yaw_std: float,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """REWARD in [0, 1]: the robot stays where it is (no drift / stepping / spinning):
+    exp(-|v_com_xy|^2 / lin_std^2 - w_z^2 / yaw_std^2)."""
+    asset: Entity = env.scene[asset_cfg.name]
+    v = asset.data.root_com_lin_vel_w[:, :2]
+    wz = asset.data.root_link_ang_vel_w[:, 2]
+    err = torch.sum(torch.square(v), dim=1) / lin_std**2 + torch.square(wz) / yaw_std**2
+    return torch.nan_to_num(torch.exp(-err), nan=0.0)
+
+
+def skill_feet_contact(env: ManagerBasedRlEnv, sensor_name: str) -> torch.Tensor:
+    """REWARD in [0, 1]: fraction of the two soles touching the floor (support both_feet)."""
+    from mjlab.sensor import ContactSensor
+
+    sensor: ContactSensor = env.scene[sensor_name]
+    assert sensor.data.found is not None
+    return (sensor.data.found > 0).float().mean(dim=1)
+
+
+def skill_foot_slip(
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """COST (>= 0): squared horizontal sole speed of the feet in contact [(m/s)^2]."""
+    from mjlab.sensor import ContactSensor
+
+    asset: Entity = env.scene[asset_cfg.name]
+    sensor: ContactSensor = env.scene[sensor_name]
+    assert sensor.data.found is not None
+    contact = (sensor.data.found > 0).float()
+    v = asset.data.site_lin_vel_w[:, asset_cfg.site_ids, :2]
+    return torch.nan_to_num(torch.sum(torch.sum(torch.square(v), dim=-1) * contact, dim=1), nan=0.0)
+
+
+def skill_final_stand(
+    env: ManagerBasedRlEnv,
+    std: float,
+    vel_std: float,
+    command_name: str = "skill",
+) -> torch.Tensor:
+    """REWARD in [0, 1], only in the return-to-stand phase (t >= duration): standing
+    joint pose, upright torso, joints at rest."""
+    sk = _qdd_skill(env, command_name)
+    asset = sk.asset
+    q0 = asset.data.default_joint_pos[:, sk.joint_ids]
+    err_q = torch.mean(torch.square(sk.joint_pos() - q0), dim=1)
+    pitch, roll = _torso_pitch_roll(asset)
+    err_tilt = torch.square(pitch) + torch.square(roll)
+    err_v = torch.mean(torch.square(asset.data.joint_vel[:, sk.joint_ids]), dim=1)
+    r = torch.exp(-(err_q + err_tilt) / std**2 - err_v / vel_std**2)
+    return torch.nan_to_num(r * sk.settling().float(), nan=0.0)
+
+
+def skill_done(env: ManagerBasedRlEnv, command_name: str = "skill") -> torch.Tensor:
+    """Termination (time-out): the skill + return-to-stand phase is over."""
+    return _qdd_skill(env, command_name).done()

@@ -17,6 +17,8 @@
 | `src/mjlab_microduck/robot/qdd_biped/policy_io.json` | 実機コントローラ向けの入出力仕様（生成物。下の「方策の入出力仕様」） |
 | `tests/test_qdd_biped_cfg.py` | 設定の検査（CPU で動く） |
 
+技（お辞儀などのキーフレーム追従、`Mjlab-Skill-QddBiped`）は `docs/qdd_skill.md`。
+
 XML の作り直し（`robot/model.py` を変えたとき）:
 
 ```
