@@ -33,6 +33,29 @@ template; a spec that tries to set it is rejected. ``validate_spec`` is the gate
 generated spec must pass before any training; it returns the normalised spec or
 raises ``SkillSpecError`` listing every problem with its location.
 
+Schema version 2 (backward compatible: version 1 specs are still accepted
+unchanged) adds jumps -- skills with flight phases (``"hop"``):
+
+    "schema_version": 2,
+    "interpolation": "pchip",       # monotone cubic: velocity continues through the push
+    "policy_rate_hz": 50,           # or 100 (fast pushes); the ONNX policy_io states dt
+    "contact": [                    # contact schedule: both soles down / both in the air
+      {"t": 0.0, "feet": "both"},
+      {"t": 1.39, "feet": "none"},  # take-off
+      {"t": 1.55, "feet": "both"}   # touchdown
+    ],
+    "flight": {"com_rise_m": 0.03, "max_takeoff_speed_mps": 0.85,
+               "max_landing_load_mg": 4.0, "toe_first": true}
+
+Per-phase gates: around a flight (``fast window`` = take-off - 0.15 s ..
+touchdown + 0.25 s) joint speeds up to 20 rad/s and keyframes 0.02 s apart are
+allowed; the flat-sole checks (torso height / pitch rate, coplanar soles, static
+balance) apply only while the feet are scheduled on the floor and outside the
+landing window; the torso pitch limit is 40 deg for a skill with flight. Take-off
+speed (CoM rise <= 4 cm, <= 0.9 m/s: motor bus current and landing) and the
+landing load per foot (<= 4.5 m g: ankle-motor radial load) are bounded by the
+template (docs/jump-feasibility.md in the robot repo).
+
 CLI:  python -m mjlab_microduck.tasks.qdd_skill <spec.json> [...]   (exit 1 on errors)
 """
 
@@ -47,7 +70,8 @@ from pathlib import Path
 
 import numpy as np
 
-SKILL_SCHEMA_VERSION = 1
+SKILL_SCHEMA_VERSION = 2  # newest; 1 is still accepted (no flight, 50 Hz)
+SUPPORTED_SCHEMA_VERSIONS = (1, 2)
 SKILLS_DIR = Path(__file__).resolve().parents[1] / "robot" / "qdd_biped" / "skills"
 SKILL_SCHEMA_JSON = SKILLS_DIR / "skill_spec.schema.json"
 DEFAULT_SKILL_JSON = SKILLS_DIR / "bow.json"
@@ -55,7 +79,9 @@ DEFAULT_SKILL_JSON = SKILLS_DIR / "bow.json"
 # when the task package is imported (registration builds the env cfg).
 SKILL_SPEC_ENV = "QDD_SKILL_SPEC"
 
-POLICY_DT_S = 0.02  # 50 Hz (same as walking)
+POLICY_DT_S = 0.02  # 50 Hz (same as walking); default policy rate
+POLICY_RATES_HZ = (50, 100)  # v2 "policy_rate_hz"
+G = 9.81
 
 # --- Template limits (fixed; not settable from a spec) -----------------------------
 DURATION_RANGE_S = (1.0, 8.0)
@@ -64,7 +90,7 @@ SETTLE_DEFAULT_S = 1.0
 MAX_KEYFRAMES = 16
 MIN_KEYFRAME_GAP_S = 0.2
 MAX_DESCRIPTION_CHARS = 500
-INTERPOLATIONS = ("minjerk", "linear")
+INTERPOLATIONS = ("minjerk", "linear", "pchip")  # pchip: schema 2
 SUPPORTS = ("both_feet",)
 JOINT_LIMIT_MARGIN_DEG = 3.0  # keyframes stay this far inside the joint range
 KNEE_LIMIT_MARGIN_RAD = 0.05  # same margin as the walking task's knee_limit cost
@@ -83,6 +109,25 @@ STAND_TOL_DEG = 0.5  # first / last keyframe vs. the standing pose
 FOOT_HALF_LENGTH_M = 0.075  # 150 x 70 mm soles centred under the ankle (foot site)
 FOOT_HALF_WIDTH_M = 0.035
 
+# --- Flight (schema 2; robot repo docs/jump-feasibility.md) ---------------------------
+CONTACT_STATES = ("both", "none")
+MAX_FLIGHTS = 3
+FLIGHT_TIME_RANGE_S = (0.06, 0.3)  # the controller faults after 0.3 s airborne
+FLIGHT_TIME_TOL_S = 0.06  # scheduled flight vs. ballistic 2 v0 / g
+FAST_PRE_S = 0.15  # fast window starts this long before take-off (push-off) ...
+LANDING_WINDOW_S = 0.25  # ... and ends this long after touchdown (absorb)
+FAST_JOINT_SPEED_RAD_S = 20.0  # push-off 12-19 rad/s (GIM6010-8 at 22 V: 4 Nm left at 20 rad/s)
+FAST_TORSO_RATE_RAD_S = 6.0  # the push-off pitches the torso back 35 -> 23 deg in ~90 ms
+FAST_MIN_KEYFRAME_GAP_S = 0.02
+MIN_RECOVERY_S = 0.5  # last touchdown -> end of the motion
+FLIGHT_TORSO_PITCH_RANGE_DEG = (-15.0, 40.0)  # crouch for a momentum-free push: ~35 deg
+COM_RISE_RANGE_M = (0.005, 0.04)  # bus current (LM5069) and landing load
+TAKEOFF_SPEED_RANGE_MPS = (0.3, 0.9)
+LANDING_LOAD_RANGE_MG = (2.0, 4.5)  # per foot; GIM3510-8 radial limit 300 N = 4.7 m g
+FLIGHT_KEYS = {"com_rise_m", "max_takeoff_speed_mps", "max_landing_load_mg", "toe_first"}
+CONTACT_TOL_S = 0.04  # take-off / touchdown may be this early / late (2 steps at 50 Hz)
+FLIGHT_DEFAULTS = {"max_takeoff_speed_mps": 0.85, "max_landing_load_mg": 4.0, "toe_first": True}
+
 # Reward weights a spec may set: name -> (min, max, default). Penalties are given
 # as magnitudes (the task applies them with a negative sign). Balance / contact /
 # return-to-stand have a non-zero minimum: a spec cannot switch them off.
@@ -96,6 +141,14 @@ REWARD_WEIGHT_BOUNDS: dict[str, tuple[float, float, float]] = {
     "action_rate": (0.02, 0.5, 0.1),
     "joint_torques": (5.0e-5, 1.0e-3, 2.0e-4),
     "foot_slip": (0.5, 3.0, 1.0),
+    # flight skills only (unused without a flight phase); feet_contact then weights the
+    # contact schedule (both soles down / both in the air as scheduled)
+    "flight_height": (0.5, 6.0, 3.0),
+    "flight_rotation": (0.1, 2.0, 0.5),
+    "landing_load": (0.5, 5.0, 1.0),
+    "toe_first": (0.0, 2.0, 0.5),
+    "takeoff_speed": (1.0, 20.0, 10.0),
+    "joint_power": (0.0, 5.0e-3, 1.0e-3),
 }
 
 TOP_KEYS = {
@@ -108,10 +161,15 @@ TOP_KEYS = {
     "support",
     "keyframes",
     "reward_weights",
+    "contact",
+    "flight",
+    "policy_rate_hz",
 }
+V2_ONLY_KEYS = ("contact", "flight", "policy_rate_hz")
 REQUIRED_TOP_KEYS = ("schema_version", "name", "duration_s", "keyframes")
 KEYFRAME_KEYS = {"t", "joints_deg", "torso", "note"}
 TORSO_KEYS = {"pitch_deg", "roll_deg", "height_m"}
+CONTACT_KEYS = {"t", "feet"}
 NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 _FORBIDDEN_HINT = {
     "terminations": "termination / safety limits are fixed by the template",
@@ -172,6 +230,7 @@ class FloorPose:
     quat: np.ndarray  # torso orientation in the ground frame (w, x, y, z)
     torso_xy: np.ndarray  # torso origin in the ground frame [m]
     com_xy: np.ndarray  # whole-robot CoM in the ground frame [m]
+    com_z: float  # whole-robot CoM height above the floor [m]
     feet_angle: float  # angle between the two soles [rad]
     feet_dz: float  # height difference of the soles [m]
     feet_spacing: float  # l - r sole offset along the ground y axis [m]
@@ -269,6 +328,7 @@ class FloorKinematics:
             quat=quat,
             torso_xy=torso_pos[:2],
             com_xy=com[:2],
+            com_z=float(com[2]),
             feet_angle=feet_angle,
             feet_dz=float(pl_g[2] - pr_g[2]),
             feet_spacing=float(pl_g[1] - pr_g[1]),
@@ -295,9 +355,27 @@ def _interp_weight(s: float, kind: str) -> float:
     return s * s * s * (10.0 + s * (-15.0 + 6.0 * s))  # min-jerk: zero vel/acc at keyframes
 
 
+def _pchip_slopes(kf_t: np.ndarray, kf_q: np.ndarray) -> np.ndarray:
+    """Monotone cubic (Fritsch-Carlson) slopes at the keyframes [K, J]: no overshoot,
+    zero slope at holds / extrema and at the first and last keyframe (standing, at
+    rest), continuous velocity through a monotone run (a push-off)."""
+    h = np.diff(kf_t)
+    d = np.diff(kf_q, axis=0) / h[:, None]
+    m = np.zeros_like(kf_q)
+    for k in range(1, len(kf_t) - 1):
+        w1, w2 = 2.0 * h[k] + h[k - 1], h[k] + 2.0 * h[k - 1]
+        a, b = d[k - 1], d[k]
+        same = a * b > 0.0
+        with np.errstate(divide="ignore", invalid="ignore"):
+            hm = (w1 + w2) / (w1 / a + w2 / b)
+        m[k] = np.where(same, hm, 0.0)
+    return m
+
+
 def sample_joint_reference(times: np.ndarray, kf_t: np.ndarray, kf_q: np.ndarray, kind: str) -> np.ndarray:
     """Joint reference [len(times), 10] from keyframes (held after the last one)."""
     out = np.empty((len(times), kf_q.shape[1]))
+    slopes = _pchip_slopes(kf_t, kf_q) if kind == "pchip" else None
     for i, t in enumerate(times):
         if t <= kf_t[0]:
             out[i] = kf_q[0]
@@ -305,23 +383,54 @@ def sample_joint_reference(times: np.ndarray, kf_t: np.ndarray, kf_q: np.ndarray
             out[i] = kf_q[-1]
         else:
             j = int(np.searchsorted(kf_t, t, side="right")) - 1
-            s = (t - kf_t[j]) / (kf_t[j + 1] - kf_t[j])
-            out[i] = kf_q[j] + _interp_weight(float(s), kind) * (kf_q[j + 1] - kf_q[j])
+            h = kf_t[j + 1] - kf_t[j]
+            s = (t - kf_t[j]) / h
+            if slopes is None:
+                out[i] = kf_q[j] + _interp_weight(float(s), kind) * (kf_q[j + 1] - kf_q[j])
+            else:  # cubic Hermite
+                s2, s3 = s * s, s * s * s
+                out[i] = (
+                    (2 * s3 - 3 * s2 + 1) * kf_q[j]
+                    + (s3 - 2 * s2 + s) * h * slopes[j]
+                    + (-2 * s3 + 3 * s2) * kf_q[j + 1]
+                    + (s3 - s2) * h * slopes[j + 1]
+                )
     return out
+
+
+def flight_intervals(contact) -> list[tuple[float, float]]:
+    """[(take-off, touchdown)] from a (validated) contact schedule."""
+    out = []
+    for i, c in enumerate(contact or []):
+        if c["feet"] == "none" and i + 1 < len(contact):
+            out.append((float(c["t"]), float(contact[i + 1]["t"])))
+    return out
+
+
+def takeoff_speed(com_rise_m: float) -> float:
+    """CoM take-off speed for a CoM rise h: v0 = sqrt(2 g h)."""
+    return math.sqrt(2.0 * G * com_rise_m)
 
 
 def build_reference_arrays(spec: dict, kf_t: np.ndarray, kf_q: np.ndarray, dt: float = POLICY_DT_S) -> dict:
     """Dense reference at the policy rate: index k = time k * dt since the skill
     started, k = 0 .. n (n = round((duration + settle) / dt)). Keys: t, q [n+1, 10]
     (absolute, rad), pitch, roll, height, quat [n+1, 4] (torso in the ground frame),
-    com_xy, feet_angle, feet_dz, feet_spacing, support_margin, in_skill (t < duration)."""
+    com_xy, com_z, feet_angle, feet_dz, feet_spacing, support_margin, in_skill
+    (t < duration). Contact schedule (schema 2): in_air (scheduled flight),
+    air_window (flight + landing window: the flat-sole quantities are not meaningful
+    there; pitch / roll / height are held at their take-off values), fast_window
+    (push-off .. landing), height_window (push-off + flight: CoM height reference
+    com_z_ref = flat-sole CoM, ballistic in flight), near_switch (within
+    CONTACT_TOL_S of a scheduled take-off / touchdown), rsi_ok (reference-state
+    initialisation allowed: outside the fast window), flights [(t0, t1)]."""
     total = spec["duration_s"] + spec["settle_s"]
     n = int(round(total / dt))
     t = np.arange(n + 1) * dt
     q = sample_joint_reference(t, kf_t, kf_q, spec["interpolation"])
     fk = floor_kinematics()
     poses = [fk(x) for x in q]
-    return {
+    ref = {
         "t": t,
         "q": q,
         "pitch": np.array([p.pitch for p in poses]),
@@ -329,19 +438,55 @@ def build_reference_arrays(spec: dict, kf_t: np.ndarray, kf_q: np.ndarray, dt: f
         "height": np.array([p.height for p in poses]),
         "quat": np.array([p.quat for p in poses]),
         "com_xy": np.array([p.com_xy for p in poses]),
+        "com_z": np.array([p.com_z for p in poses]),
         "feet_angle": np.array([p.feet_angle for p in poses]),
         "feet_dz": np.array([p.feet_dz for p in poses]),
         "feet_spacing": np.array([p.feet_spacing for p in poses]),
         "support_margin": np.array([p.support_margin for p in poses]),
         "in_skill": t < spec["duration_s"] - 1e-9,
     }
+    eps = 1e-9
+    flights = flight_intervals(spec.get("contact"))
+    in_air = np.zeros(n + 1, dtype=bool)
+    air = np.zeros(n + 1, dtype=bool)
+    fast = np.zeros(n + 1, dtype=bool)
+    hwin = np.zeros(n + 1, dtype=bool)
+    near = np.zeros(n + 1, dtype=bool)
+    com_ref = ref["com_z"].copy()
+    rise = (spec.get("flight") or {}).get("com_rise_m", 0.0)
+    for t0, t1 in flights:
+        k0 = int(np.clip(math.ceil(t0 / dt - 1e-6) - 1, 0, n))  # last step on the ground
+        m_air = (t >= t0 - eps) & (t < t1 - eps)
+        m_land = (t >= t0 - eps) & (t < t1 + LANDING_WINDOW_S - eps)
+        in_air |= m_air
+        air |= m_land
+        fast |= (t >= t0 - FAST_PRE_S - eps) & (t < t1 + LANDING_WINDOW_S - eps)
+        hwin |= (t >= t0 - FAST_PRE_S - eps) & (t < t1 - eps)
+        near |= (np.abs(t - t0) <= CONTACT_TOL_S + eps) | (np.abs(t - t1) <= CONTACT_TOL_S + eps)
+        v0 = takeoff_speed(rise)
+        tau = t[m_air] - t[k0]
+        com_ref[m_air] = ref["com_z"][k0] + v0 * tau - 0.5 * G * tau * tau
+        for key in ("pitch", "roll", "height"):
+            ref[key][m_land] = ref[key][k0]
+    ref.update(
+        in_air=in_air,
+        air_window=air,
+        fast_window=fast,
+        height_window=hwin,
+        near_switch=near,
+        com_z_ref=com_ref,
+        rsi_ok=~fast,
+        flights=flights,
+    )
+    return ref
 
 
-def build_reference(spec: dict, dt: float = POLICY_DT_S) -> dict:
-    """Dense reference for a VALIDATED spec (see build_reference_arrays)."""
+def build_reference(spec: dict, dt: float | None = None) -> dict:
+    """Dense reference for a VALIDATED spec (see build_reference_arrays); dt defaults
+    to the spec's policy period."""
     kf_t = np.array([kf["t"] for kf in spec["keyframes"]], dtype=float)
     kf_q = np.array([kf["_q_rad"] for kf in spec["keyframes"]], dtype=float)
-    return build_reference_arrays(spec, kf_t, kf_q, dt)
+    return build_reference_arrays(spec, kf_t, kf_q, spec.get("policy_dt_s", POLICY_DT_S) if dt is None else dt)
 
 
 # =============================================================================
@@ -384,6 +529,119 @@ def _resolve_joints(jd, where: str, errors: list[str]) -> np.ndarray:
     return q
 
 
+def _validate_contact(spec: dict, duration, errors: list[str]) -> list[dict]:
+    """Contact schedule (schema 2). Returns the normalised list (default: both feet
+    down the whole time)."""
+    default = [{"t": 0.0, "feet": "both"}]
+    if "contact" not in spec:
+        return default
+    c = spec["contact"]
+    if not isinstance(c, list) or not 1 <= len(c) <= 2 * MAX_FLIGHTS + 1:
+        errors.append(f"contact: must be a list of 1..{2 * MAX_FLIGHTS + 1} phases {{t, feet}}")
+        return default
+    out = []
+    for i, ph in enumerate(c):
+        where = f"contact[{i}]"
+        if not isinstance(ph, dict):
+            errors.append(f'{where}: must be an object {{"t": seconds, "feet": "both" | "none"}}')
+            return default
+        for k in ph:
+            if k not in CONTACT_KEYS:
+                errors.append(f"{where}.{k}: not allowed (allowed: {sorted(CONTACT_KEYS)})")
+        t, feet = ph.get("t"), ph.get("feet")
+        if not _is_number(t):
+            errors.append(f"{where}.t: must be a number of seconds, got {t!r}")
+            return default
+        if feet not in CONTACT_STATES:
+            errors.append(
+                f"{where}.feet: {feet!r} must be one of {list(CONTACT_STATES)} (single-foot phases are not "
+                f"supported)"
+            )
+            return default
+        out.append({"t": float(t), "feet": feet})
+    n_err = len(errors)
+    if out[0]["t"] != 0.0 or out[0]["feet"] != "both":
+        errors.append("contact[0]: the schedule must start at t = 0 with both feet down")
+    if out[-1]["feet"] != "both":
+        errors.append(f"contact[{len(out) - 1}]: the schedule must end with both feet down (touchdown)")
+    for i in range(1, len(out)):
+        if out[i]["t"] <= out[i - 1]["t"]:
+            errors.append(f"contact[{i}].t: times must increase ({out[i]['t']} after {out[i - 1]['t']})")
+        if out[i]["feet"] == out[i - 1]["feet"]:
+            errors.append(f"contact[{i}]: phases must alternate both / none (repeated '{out[i]['feet']}')")
+    if len(errors) > n_err:
+        return out
+    lo, hi = FLIGHT_TIME_RANGE_S
+    for t0, t1 in flight_intervals(out):
+        if not lo - 1e-9 <= t1 - t0 <= hi + 1e-9:
+            errors.append(
+                f"contact: flight {t0:.3f}..{t1:.3f} s lasts {t1 - t0:.3f} s (allowed {lo}..{hi} s; the "
+                f"controller faults after {hi} s airborne)"
+            )
+        if t0 < 0.5:
+            errors.append(f"contact: take-off at {t0} s is too early (crouch first; >= 0.5 s)")
+        if duration is not None and t1 > duration - MIN_RECOVERY_S + 1e-9:
+            errors.append(
+                f"contact: touchdown at {t1} s leaves less than {MIN_RECOVERY_S} s to return to the standing "
+                f"pose before duration_s = {duration}"
+            )
+    return out
+
+
+def _validate_flight(spec: dict, contact: list[dict], errors: list[str]) -> dict | None:
+    flights = flight_intervals(contact)
+    fl = spec.get("flight")
+    if not flights:
+        if fl is not None:
+            errors.append("flight: given, but the contact schedule has no 'none' (flight) phase")
+        return None
+    if not isinstance(fl, dict):
+        errors.append(
+            'flight: required for a contact schedule with a flight phase ({"com_rise_m": ..., '
+            '"max_takeoff_speed_mps": ..., "max_landing_load_mg": ...})'
+        )
+        return None
+    for k in fl:
+        if k not in FLIGHT_KEYS:
+            errors.append(f"flight.{k}: not allowed (allowed: {sorted(FLIGHT_KEYS)})")
+    out = dict(FLIGHT_DEFAULTS)
+    for key, rng in (
+        ("com_rise_m", COM_RISE_RANGE_M),
+        ("max_takeoff_speed_mps", TAKEOFF_SPEED_RANGE_MPS),
+        ("max_landing_load_mg", LANDING_LOAD_RANGE_MG),
+    ):
+        if key not in fl:
+            if key == "com_rise_m":
+                errors.append("flight.com_rise_m: required (target CoM rise above the take-off height, m)")
+            continue
+        v = fl[key]
+        if not _is_number(v) or not rng[0] <= float(v) <= rng[1]:
+            errors.append(f"flight.{key}: {v!r} must be a number in [{rng[0]}, {rng[1]}]")
+            continue
+        out[key] = float(v)
+    if "toe_first" in fl:
+        if not isinstance(fl["toe_first"], bool):
+            errors.append("flight.toe_first: must be true or false")
+        else:
+            out["toe_first"] = fl["toe_first"]
+    if "com_rise_m" not in out:
+        return None
+    v0 = takeoff_speed(out["com_rise_m"])
+    if v0 > out["max_takeoff_speed_mps"] + 1e-9:
+        errors.append(
+            f"flight: a CoM rise of {out['com_rise_m']} m needs a take-off speed of {v0:.2f} m/s, above "
+            f"max_takeoff_speed_mps = {out['max_takeoff_speed_mps']}"
+        )
+    t_ball = 2.0 * v0 / G
+    for t0, t1 in flights:
+        if abs((t1 - t0) - t_ball) > FLIGHT_TIME_TOL_S + 1e-9:
+            errors.append(
+                f"contact: flight {t0:.3f}..{t1:.3f} s ({t1 - t0:.3f} s) does not match the ballistic flight "
+                f"time {t_ball:.3f} s of a {out['com_rise_m']} m CoM rise (tolerance {FLIGHT_TIME_TOL_S} s)"
+            )
+    return out
+
+
 def validate_spec(spec) -> dict:
     """Validate a skill spec (dict parsed from JSON). Returns the normalised spec
     (defaults filled in, ``_q_rad`` joint vectors added to the keyframes) or raises
@@ -400,8 +658,14 @@ def validate_spec(spec) -> dict:
     if missing:
         raise SkillSpecError(errors)
 
-    if spec["schema_version"] != SKILL_SCHEMA_VERSION or isinstance(spec["schema_version"], bool):
-        errors.append(f"schema_version: must be {SKILL_SCHEMA_VERSION}, got {spec['schema_version']!r}")
+    version = spec["schema_version"]
+    if isinstance(version, bool) or version not in SUPPORTED_SCHEMA_VERSIONS:
+        errors.append(f"schema_version: must be one of {list(SUPPORTED_SCHEMA_VERSIONS)}, got {version!r}")
+        version = SKILL_SCHEMA_VERSION
+    if version < 2:
+        for k in V2_ONLY_KEYS:
+            if k in spec:
+                errors.append(f"'{k}' needs schema_version 2")
     name = spec["name"]
     if not isinstance(name, str) or not NAME_RE.match(name):
         errors.append(f"name: {name!r} must match {NAME_RE.pattern} (lowercase ascii letters, digits, _)")
@@ -425,9 +689,25 @@ def validate_spec(spec) -> dict:
     if interp not in INTERPOLATIONS:
         errors.append(f"interpolation: {interp!r} must be one of {list(INTERPOLATIONS)}")
         interp = "minjerk"
+    elif interp == "pchip" and version < 2:
+        errors.append("interpolation: 'pchip' needs schema_version 2")
     support = spec.get("support", "both_feet")
     if support not in SUPPORTS:
         errors.append(f"support: {support!r} must be one of {list(SUPPORTS)}")
+    rate = spec.get("policy_rate_hz", 50)
+    if isinstance(rate, bool) or rate not in POLICY_RATES_HZ:
+        errors.append(f"policy_rate_hz: {rate!r} must be one of {list(POLICY_RATES_HZ)}")
+        rate = 50
+    dt = 1.0 / float(rate)
+    contact = _validate_contact(spec, duration, errors)
+    flight = _validate_flight(spec, contact, errors)
+    flights = flight_intervals(contact)
+
+    def in_fast(t):
+        return any(t0 - FAST_PRE_S - 1e-9 <= t <= t1 + LANDING_WINDOW_S + 1e-9 for t0, t1 in flights)
+
+    def in_air(t):
+        return any(t0 - 1e-9 <= t <= t1 + LANDING_WINDOW_S + 1e-9 for t0, t1 in flights)
 
     # --- reward weights
     weights = {k: v[2] for k, v in REWARD_WEIGHT_BOUNDS.items()}
@@ -492,10 +772,13 @@ def validate_spec(spec) -> dict:
                 f"(got {t_arr[-1]})"
             )
         for i in range(1, len(t_arr)):
-            if t_arr[i] - t_arr[i - 1] < MIN_KEYFRAME_GAP_S - 1e-9:
+            fast = in_fast(t_arr[i]) and in_fast(t_arr[i - 1])
+            gap = FAST_MIN_KEYFRAME_GAP_S if fast else MIN_KEYFRAME_GAP_S
+            if t_arr[i] - t_arr[i - 1] < gap - 1e-9:
                 errors.append(
-                    f"keyframes[{i}].t: {t_arr[i]} must be at least {MIN_KEYFRAME_GAP_S} s after the "
+                    f"keyframes[{i}].t: {t_arr[i]} must be at least {gap} s after the "
                     f"previous keyframe ({t_arr[i - 1]})"
+                    + (f" ({FAST_MIN_KEYFRAME_GAP_S} s only around a flight phase)" if flights and not fast else "")
                 )
     for i in (0, len(kfs) - 1):
         dev = float(np.degrees(np.abs(qs[i] - stand)).max())
@@ -536,6 +819,12 @@ def validate_spec(spec) -> dict:
     # --- kinematic / balance checks on the keyframes and the dense reference
     fk = floor_kinematics()
     for i, (q, tor) in enumerate(zip(qs, torsos)):
+        if tor and in_air(t_arr[i]):
+            errors.append(
+                f"keyframes[{i}].torso: no torso cross-check in a flight / landing window (the soles are not "
+                f"flat on the floor there); remove it"
+            )
+            continue
         fp = fk(q)
         if "pitch_deg" in tor and abs(math.degrees(fp.pitch) - tor["pitch_deg"]) > TORSO_CHECK_TOL_DEG:
             errors.append(
@@ -554,20 +843,27 @@ def validate_spec(spec) -> dict:
                 f"{fp.height:.3f} m with the soles flat"
             )
     ref = build_reference_arrays(
-        {"duration_s": duration, "settle_s": settle, "interpolation": interp}, t_arr, np.array(qs)
+        {"duration_s": duration, "settle_s": settle, "interpolation": interp, "contact": contact, "flight": flight},
+        t_arr,
+        np.array(qs),
+        dt,
     )
-    check_reference(ref, errors)
+    check_reference(ref, errors, flight=bool(flights))
     if errors:
         raise SkillSpecError(errors)
 
     out = {
-        "schema_version": SKILL_SCHEMA_VERSION,
+        "schema_version": int(version),
         "name": name,
         "description": desc,
         "duration_s": duration,
         "settle_s": settle,
         "interpolation": interp,
         "support": support,
+        "policy_rate_hz": int(rate),
+        "policy_dt_s": dt,
+        "contact": contact,
+        "flight": flight,
         "keyframes": [dict(kf) for kf in kfs],
         "reward_weights": weights,
     }
@@ -576,43 +872,57 @@ def validate_spec(spec) -> dict:
     return out
 
 
-def check_reference(ref: dict, errors: list[str]) -> None:
-    """Template safety / feasibility checks on a dense reference (appends to errors)."""
+def check_reference(ref: dict, errors: list[str], flight: bool = False) -> None:
+    """Template safety / feasibility checks on a dense reference (appends to errors).
+    Around a flight (ref fast_window / air_window) the joint-speed limit is relaxed and
+    the flat-sole checks are skipped (see the module docstring)."""
     from mjlab_microduck.robot.qdd_biped_constants import knee_max
 
     names = _joint_names()
     t = ref["t"]
+    dt = float(t[1] - t[0])
+    n1 = len(t)
+    fast = ref.get("fast_window", np.zeros(n1, dtype=bool))
+    ground = ~ref.get("air_window", np.zeros(n1, dtype=bool))
 
     def at(mask) -> str:
         return f"t = {t[int(np.argmax(mask))]:.2f} s"
 
-    dq = np.abs(np.diff(ref["q"], axis=0)) / POLICY_DT_S
-    if dq.max() > MAX_JOINT_SPEED_RAD_S:
-        k, j = np.unravel_index(np.argmax(dq), dq.shape)
+    dq = np.abs(np.diff(ref["q"], axis=0)) / dt
+    fast_pair = fast[:-1] | fast[1:]
+    lim = np.where(fast_pair, FAST_JOINT_SPEED_RAD_S, MAX_JOINT_SPEED_RAD_S)[:, None]
+    over = dq - lim
+    if over.max() > 1e-9:
+        k, j = np.unravel_index(np.argmax(over), over.shape)
         errors.append(
-            f"reference: {names[j]} moves at {dq.max():.2f} rad/s around t = {t[k]:.2f} s "
-            f"(limit {MAX_JOINT_SPEED_RAD_S} rad/s; spread the keyframes further apart)"
+            f"reference: {names[j]} moves at {dq[k, j]:.2f} rad/s around t = {t[k]:.2f} s "
+            f"(limit {lim[k, 0]} rad/s; spread the keyframes further apart)"
         )
+    ground_pair = ground[:-1] & ground[1:]
     for key in ("pitch", "roll"):
-        rate = np.abs(np.diff(ref[key])) / POLICY_DT_S
-        if rate.max() > MAX_TORSO_RATE_RAD_S:
+        rate = np.abs(np.diff(ref[key])) / dt
+        rlim = np.where(fast_pair, FAST_TORSO_RATE_RAD_S, MAX_TORSO_RATE_RAD_S)
+        bad = ground_pair & (rate > rlim + 1e-9)
+        if bad.any():
+            k = int(np.argmax(np.where(bad, rate - rlim, -np.inf)))
             errors.append(
-                f"reference: torso {key} rate {rate.max():.2f} rad/s at {at(rate == rate.max())} "
-                f"(limit {MAX_TORSO_RATE_RAD_S} rad/s)"
+                f"reference: torso {key} rate {rate[k]:.2f} rad/s at t = {t[k]:.2f} s (limit {rlim[k]} rad/s)"
             )
-    pd = np.degrees(ref["pitch"])
-    lo, hi = TORSO_PITCH_RANGE_DEG
-    if pd.max() > hi + 1e-6 or pd.min() < lo - 1e-6:
+    pd = np.degrees(ref["pitch"][ground])
+    lo, hi = FLIGHT_TORSO_PITCH_RANGE_DEG if flight else TORSO_PITCH_RANGE_DEG
+    if pd.size and (pd.max() > hi + 1e-6 or pd.min() < lo - 1e-6):
         errors.append(
             f"reference: torso pitch reaches {pd.max() if pd.max() > hi else pd.min():.1f} deg "
-            f"(allowed [{lo}, {hi}] deg, + = nose down; the controller trips at 35 deg)"
+            f"(allowed [{lo}, {hi}] deg, + = nose down; the controller trips at 35 deg"
+            f"{', 50 deg during a skill with flight' if flight else ''})"
         )
-    rd = np.degrees(np.abs(ref["roll"]))
-    if rd.max() > TORSO_ROLL_MAX_DEG + 1e-6:
+    rd = np.degrees(np.abs(ref["roll"][ground]))
+    if rd.size and rd.max() > TORSO_ROLL_MAX_DEG + 1e-6:
         errors.append(f"reference: torso roll reaches {rd.max():.1f} deg (limit {TORSO_ROLL_MAX_DEG} deg)")
-    if ref["height"].min() < TORSO_HEIGHT_MIN_M:
+    if ref["height"][ground].min() < TORSO_HEIGHT_MIN_M:
         errors.append(
-            f"reference: torso height drops to {ref['height'].min():.3f} m (minimum {TORSO_HEIGHT_MIN_M} m)"
+            f"reference: torso height drops to {ref['height'][ground].min():.3f} m "
+            f"(minimum {TORSO_HEIGHT_MIN_M} m)"
         )
     for side in ("l", "r"):
         hp, kn = ref["q"][:, names.index(f"{side}_hip_pitch")], ref["q"][:, names.index(f"{side}_knee")]
@@ -622,26 +932,26 @@ def check_reference(ref: dict, errors: list[str]) -> None:
                 f"reference: {side}_knee passes the pose-dependent knee limit between keyframes at "
                 f"{at(over > 1e-9)} (add a keyframe that bends the hip first)"
             )
-    fa = np.degrees(ref["feet_angle"])
+    fa = np.where(ground, np.degrees(ref["feet_angle"]), 0.0)
     if fa.max() > FEET_COPLANAR_DEG:
         errors.append(
             f"reference: the soles are not parallel ({fa.max():.1f} deg at {at(fa > FEET_COPLANAR_DEG)}); "
             f"support 'both_feet' needs both soles flat on the floor (mirror the legs or compensate with "
             f"the other joints)"
         )
-    dz = np.abs(ref["feet_dz"])
+    dz = np.where(ground, np.abs(ref["feet_dz"]), 0.0)
     if dz.max() > FEET_COPLANAR_M:
         errors.append(
             f"reference: the soles are at different heights ({100 * dz.max():.1f} cm at "
             f"{at(dz > FEET_COPLANAR_M)}); support 'both_feet' needs both soles on the floor"
         )
-    sp = ref["feet_spacing"]
+    sp = ref["feet_spacing"][ground]
     if sp.min() < FEET_SPACING_RANGE_M[0] or sp.max() > FEET_SPACING_RANGE_M[1]:
         errors.append(
             f"reference: lateral sole spacing {sp.min():.3f}..{sp.max():.3f} m is outside "
             f"[{FEET_SPACING_RANGE_M[0]}, {FEET_SPACING_RANGE_M[1]}] m"
         )
-    sm = ref["support_margin"]
+    sm = np.where(ground, ref["support_margin"], np.inf)
     if sm.min() < COM_SUPPORT_MARGIN_M:
         k = int(np.argmin(sm))
         errors.append(

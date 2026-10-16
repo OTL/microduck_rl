@@ -60,8 +60,8 @@ DEFAULT_JOINT_POS = {
     r".*_ankle_pitch": -_k / 2,
 }
 # Torso-origin height with the soles on the floor in that pose: yaw->roll 0.064 +
-# 2 * 0.13 * cos(22.5 deg) + ankle->sole 0.040 = 0.3442 m (checked with MuJoCo).
-STAND_BASE_Z = 0.3442
+# 2 * 0.13 * cos(22.5 deg) + ankle->sole 0.050 (PA12 sole 40 + 10 mm TPU landing pad) = 0.3542 m.
+STAND_BASE_Z = 0.3542
 
 HOME_FRAME = EntityCfg.InitialStateCfg(
     pos=(0.0, 0.0, STAND_BASE_Z + 0.005),
@@ -144,3 +144,38 @@ def knee_max(hip_pitch_rad: float) -> float:
     hp = math.degrees(hip_pitch_rad)
     k = 80 if hp > 0 else 90 if hp > -15 else 100 if hp > -30 else 110 if hp > -45 else 120
     return math.radians(k)
+
+
+def qdd_envelope_actuators(delay_max_lag: int = 2, v_bus: float = 22.0) -> tuple:
+    """Same gains / driver clamps as the actuators above, as explicit PD with the
+    motors' torque-speed envelope (actuator/qdd_motor.py, robot repo analysis/hop.py
+    tmax): what a jump needs. delay_max_lag in physics steps (0-10 ms)."""
+    from mjlab_microduck.actuator.qdd_motor import QddMotorActuatorCfg
+
+    d = dict(delay_min_lag=0, delay_max_lag=delay_max_lag, v_bus=v_bus)
+    return (
+        QddMotorActuatorCfg(
+            target_names_expr=(r".*_hip_yaw", r".*_hip_roll"),
+            stiffness=HIP_YAW_ROLL_KP,
+            damping=HIP_YAW_ROLL_KD,
+            effort_limit=GIM6010_PEAK,
+            motor="6010",
+            **d,
+        ),
+        QddMotorActuatorCfg(
+            target_names_expr=(r".*_hip_pitch", r".*_knee"),
+            stiffness=HIP_PITCH_KNEE_KP,
+            damping=HIP_PITCH_KNEE_KD,
+            effort_limit=GIM6010_PEAK,
+            motor="6010",
+            **d,
+        ),
+        QddMotorActuatorCfg(
+            target_names_expr=(r".*_ankle_pitch",),
+            stiffness=ANKLE_KP,
+            damping=ANKLE_KD,
+            effort_limit=ANKLE_PEAK,
+            motor="3510",
+            **d,
+        ),
+    )

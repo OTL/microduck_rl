@@ -319,6 +319,9 @@ register_mjlab_task(
 # walking policy; the ONNX carries the skill's policy_io + spec.
 from .qdd_biped_skill_env_cfg import (
     TASK_ID as _QDD_SKILL_TASK_ID,
+    JUMP_SPEC as _QDD_JUMP_SPEC,
+    JUMP_TASK_ID as _QDD_JUMP_TASK_ID,
+    QddJumpRlCfg,
     QddSkillRlCfg,
     make_qdd_biped_skill_env_cfg,
     skill_onnx_metadata as _qdd_skill_onnx_metadata,
@@ -403,5 +406,15 @@ register_mjlab_task(
     env_cfg=make_qdd_biped_skill_env_cfg(),
     play_env_cfg=make_qdd_biped_skill_env_cfg(play=True),
     rl_cfg=QddSkillRlCfg,
+    runner_cls=QddSkillOnPolicyRunner,
+)
+
+# Jump skill (spec schema 2 with a flight phase): its own task id so yatai trains it
+# without $QDD_SKILL_SPEC (skills/hop.json).
+register_mjlab_task(
+    task_id=_QDD_JUMP_TASK_ID,
+    env_cfg=make_qdd_biped_skill_env_cfg(_QDD_JUMP_SPEC),
+    play_env_cfg=make_qdd_biped_skill_env_cfg(_QDD_JUMP_SPEC, play=True),
+    rl_cfg=QddJumpRlCfg,
     runner_cls=QddSkillOnPolicyRunner,
 )

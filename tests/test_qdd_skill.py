@@ -81,7 +81,7 @@ BAD_SPECS = {
     "not_object": ([1, 2], "JSON object"),
     "missing_keyframes": (_mutate(lambda r: r.pop("keyframes")), "'keyframes' is required"),
     "terminations": (_mutate(lambda r: r.update(terminations={"fell_over": 90})), "fixed by the template"),
-    "schema_version": (_mutate(lambda r: r.update(schema_version=2)), "schema_version"),
+    "schema_version": (_mutate(lambda r: r.update(schema_version=3)), "schema_version"),
     "bad_name": (_mutate(lambda r: r.update(name="Bow!")), "name:"),
     "long_duration": (_mutate(lambda r: r.update(duration_s=20.0)), "duration_s: 20.0 is outside"),
     "weight_high": (
@@ -281,7 +281,7 @@ def test_rewards_peak_on_the_reference():
         env.sim.forward()
         assert microduck_mdp.skill_joint_tracking(env, 0.15).item() > 0.99
         assert microduck_mdp.skill_torso_orientation(env, 0.1).item() > 0.99
-        assert microduck_mdp.skill_torso_height(env, 0.02).item() > 0.8  # spawned up to 5 mm high
+        assert microduck_mdp.skill_torso_height(env, 0.02).item() > 0.7  # spawned 5-10 mm high
         assert microduck_mdp.skill_final_stand(env, 0.15, 1.0).item() == 0.0  # not settling yet
     finally:
         env.close()

@@ -1,0 +1,68 @@
+{
+  "schema_version": 2,
+  "name": "hop",
+  "description": "両足ジャンプ（小）: 胴体を約35度前に倒してしゃがみ、重心が足の上・角運動量0のまま押し出して重心を約3cm上げる（離陸0.77m/s）。空中で回らず、つま先を20度下げて着地し、膝で受けて立ち姿勢に戻る。押し出しは robot repo の analysis/hop.py（kf 60度、3cm）。",
+  "duration_s": 2.8,
+  "settle_s": 1.2,
+  "interpolation": "pchip",
+  "policy_rate_hz": 50,
+  "support": "both_feet",
+  "contact": [
+    {"t": 0.0, "feet": "both"},
+    {"t": 1.39, "feet": "none"},
+    {"t": 1.55, "feet": "both"}
+  ],
+  "flight": {
+    "com_rise_m": 0.03,
+    "max_takeoff_speed_mps": 0.85,
+    "max_landing_load_mg": 4.0,
+    "toe_first": true
+  },
+  "keyframes": [
+    {"t": 0.0, "note": "standing"},
+    {
+      "t": 1.0,
+      "joints_deg": {"hip_pitch": -92.7, "knee": 92.9, "ankle_pitch": -35.3},
+      "torso": {"pitch_deg": 35.0},
+      "note": "crouch: torso 35 deg forward, CoM over the feet (hop.py k0 95 / p0 35)"
+    },
+    {
+      "t": 1.3,
+      "joints_deg": {"hip_pitch": -92.7, "knee": 92.9, "ankle_pitch": -35.3},
+      "torso": {"pitch_deg": 35.0},
+      "note": "hold, then push"
+    },
+    {"t": 1.322, "joints_deg": {"hip_pitch": -90.5, "knee": 91.0, "ankle_pitch": -34.8}, "note": "push 25 %"},
+    {"t": 1.344, "joints_deg": {"hip_pitch": -83.8, "knee": 85.0, "ankle_pitch": -33.3}, "note": "push 50 %"},
+    {"t": 1.365, "joints_deg": {"hip_pitch": -72.9, "knee": 74.7, "ankle_pitch": -30.3}, "note": "push 75 %"},
+    {
+      "t": 1.387,
+      "joints_deg": {"hip_pitch": -57.1, "knee": 59.5, "ankle_pitch": -25.4},
+      "torso": {"pitch_deg": 23.0},
+      "note": "take-off: knee 60 deg, CoM 0.77 m/s up, torso 23 deg (zero angular momentum)"
+    },
+    {
+      "t": 1.47,
+      "joints_deg": {"hip_pitch": -53.0, "knee": 60.0, "ankle_pitch": -10.0},
+      "note": "apex: legs vertical under the CoM, toes 20 deg down"
+    },
+    {
+      "t": 1.55,
+      "joints_deg": {"hip_pitch": -53.0, "knee": 60.0, "ankle_pitch": -10.0},
+      "note": "touchdown toes first"
+    },
+    {
+      "t": 1.8,
+      "joints_deg": {"hip_pitch": -57.5, "knee": 75.0, "ankle_pitch": -37.5},
+      "note": "absorbed: heels down, knees 75 deg"
+    },
+    {"t": 2.8, "note": "standing again"}
+  ],
+  "reward_weights": {
+    "joint_tracking": 2.0,
+    "torso_orientation": 1.5,
+    "feet_contact": 2.0,
+    "flight_height": 3.0,
+    "landing_load": 1.0
+  }
+}

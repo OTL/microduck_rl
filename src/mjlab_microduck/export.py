@@ -269,7 +269,7 @@ def run_export(task_id: str, cfg: ExportConfig) -> ExportResult:
         from mjlab_microduck.tasks.qdd_biped_velocity_env_cfg import policy_io_onnx_metadata
 
         metadata.update(policy_io_onnx_metadata())
-    elif task_id == "Mjlab-Skill-QddBiped":
+    elif task_id.startswith("Mjlab-Skill-"):
         # Skill policy: its own policy_io (skill clock, zero command) + the skill spec.
         from mjlab_microduck.tasks.qdd_biped_skill_env_cfg import skill_onnx_metadata
 

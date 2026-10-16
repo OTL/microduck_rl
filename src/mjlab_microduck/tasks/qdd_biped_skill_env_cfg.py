@@ -29,6 +29,18 @@ contact, knee limit, NaN).
 
 Play mode (export / video): nominal robot as in the walking play mode, always
 from the standing pose, episodes repeat the skill.
+
+Jumps (spec schema 2 with a flight phase, e.g. skills/hop.json; task
+Mjlab-Skill-Hop-QddBiped): physics at 2.5 ms, actuators = explicit PD with the
+motors' torque-speed envelope (actuator/qdd_motor.py, robot repo analysis/hop.py
+tmax), the contact schedule replaces "both soles down", and: CoM height tracking
+(push-off + ballistic flight to the spec's CoM rise), take-off speed limit, no
+torso rotation in flight, landing load per foot (peak over the physics substeps,
+strong above the spec's limit), toe-first touchdown, motoring power; torso
+orientation / height references and the flat-feet cost are off in the flight /
+landing window, joint tracking is looser and the action-rate cost smaller from the
+push-off to the landing; RSI only outside that window. Extra DR: sole-floor contact
+stiffness / damping (floor, sole pad), motor bus voltage and strength.
 """
 
 from __future__ import annotations
@@ -71,6 +83,23 @@ TERMINATION_WEIGHT = -100.0  # x dt = -2 per fall (a whole episode pays ~+30)
 FALL_TILT_DEG = 45.0  # termination (walking: 60); controller hard limit 50, skills <= 30
 
 RSI_FRACTION = 0.3
+
+# --- Jumps (spec with a flight phase) -------------------------------------------------
+JUMP_TASK_ID = "Mjlab-Skill-Hop-QddBiped"
+JUMP_SPEC = "hop"  # skills/hop.json (yatai cannot pass $QDD_SKILL_SPEC: own task id)
+JUMP_PHYSICS_DT = 0.0025  # s (explicit PD of the ankle is not stable at 5 ms)
+JUMP_ACTUATOR_MAX_LAG_S = 0.01  # command latency 0-10 ms (as walking)
+JUMP_PLAY_LAG_S = 0.005
+FLIGHT_HEIGHT_STD = 0.015  # m, CoM height tracking in the push-off + flight window
+FAST_TRACKING_STD_SCALE = 2.0  # joint tracking std x this from push-off to landing
+FAST_ACTION_RATE_SCALE = 0.1  # action-rate cost x this from push-off to landing
+LANDING_SOFT_FRACTION = 0.6  # landing cost starts at 0.6 x the spec limit (quadratic)
+LANDING_HARD_GAIN = 10.0  # ... and is 10x steeper above the limit
+TOE_ANGLE_SCALE_RAD = 0.17  # 10 deg toe-down at touchdown = full toe-first reward
+FOOT_SOLREF_TIMECONST_RANGE = (0.006, 0.03)  # s: hard floor / thin rubber .. soft pad
+FOOT_SOLREF_DAMPRATIO_RANGE = (0.7, 1.2)
+MOTOR_V_BUS_RANGE = (19.5, 24.0)  # V: low battery under load .. full pack
+MOTOR_STRENGTH_RANGE = (0.9, 1.1)  # torque constant / driver current calibration
 PUSH_RANGE = (-0.15, 0.15)  # m/s (walking: 0.3; a planted-feet skill should not need a step)
 SETTLE_EXTRA_S = 1.0  # episode_length_s = total + this (skill_done ends it at total)
 
@@ -96,9 +125,14 @@ def make_qdd_biped_skill_env_cfg(spec_path=None, play: bool = False) -> ManagerB
     spec = qdd_skill.load_spec(spec_path)
     w = spec["reward_weights"]
     total = qdd_skill.total_s(spec)
+    jump = spec.get("flight") is not None
 
     cfg = make_qdd_biped_velocity_env_cfg(play=play)
     cfg.episode_length_s = total + SETTLE_EXTRA_S
+    if jump:
+        _make_jump_physics(cfg, spec, play)
+    elif abs(spec["policy_dt_s"] - cfg.sim.mujoco.timestep * cfg.decimation) > 1e-9:
+        cfg.decimation = int(round(spec["policy_dt_s"] / cfg.sim.mujoco.timestep))
 
     # --- Commands: zero twist (obs slot kept) + skill clock / reference ----------
     cfg.commands = {
@@ -165,6 +199,9 @@ def make_qdd_biped_skill_env_cfg(spec_path=None, play: bool = False) -> ManagerB
         "termination": RewardTermCfg(func=mj_rewards.is_terminated, weight=TERMINATION_WEIGHT),
     }
 
+    if jump:
+        _add_jump_rewards(cfg, spec)
+
     # --- Terminations ------------------------------------------------------------------
     cfg.terminations["fell_over"].params["limit_angle"] = math.radians(FALL_TILT_DEG)
     cfg.terminations["skill_done"] = TerminationTermCfg(
@@ -174,8 +211,116 @@ def make_qdd_biped_skill_env_cfg(spec_path=None, play: bool = False) -> ManagerB
     # --- Events / curricula -------------------------------------------------------------
     if "push_robot" in cfg.events:
         cfg.events["push_robot"].params["velocity_range"] = {"x": PUSH_RANGE, "y": PUSH_RANGE}
+    if jump and not play:
+        _add_jump_events(cfg)
     cfg.curriculum = {}
     return cfg
+
+
+def _make_jump_physics(cfg: ManagerBasedRlEnvCfg, spec: dict, play: bool) -> None:
+    """2.5 ms physics, envelope actuators, per-substep foot forces."""
+    from dataclasses import replace as dc_replace
+
+    from mjlab_microduck.robot.qdd_biped_constants import qdd_envelope_actuators
+
+    dt = JUMP_PHYSICS_DT
+    cfg.sim.mujoco.timestep = dt
+    cfg.decimation = int(round(spec["policy_dt_s"] / dt))
+    assert abs(cfg.decimation * dt - spec["policy_dt_s"]) < 1e-9
+    robot = cfg.scene.entities["robot"]
+    lag = int(round(JUMP_ACTUATOR_MAX_LAG_S / dt))
+    acts = qdd_envelope_actuators(delay_max_lag=lag)
+    if play:
+        pl = int(round(JUMP_PLAY_LAG_S / dt))
+        acts = tuple(dc_replace(a, delay_min_lag=pl, delay_max_lag=pl) for a in acts)
+    robot.articulation = dc_replace(robot.articulation, actuators=acts)
+    cfg.scene.sensors = tuple(
+        dc_replace(sn, history_length=cfg.decimation) if sn.name == "feet_ground_contact" else sn
+        for sn in cfg.scene.sensors
+    )
+
+
+def _add_jump_rewards(cfg: ManagerBasedRlEnvCfg, spec: dict) -> None:
+    w = spec["reward_weights"]
+    fl = spec["flight"]
+    feet = SceneEntityCfg("robot", site_names=FOOT_SITES)
+    r = cfg.rewards
+    r["joint_tracking"].params["fast_std_scale"] = FAST_TRACKING_STD_SCALE
+    r["feet_contact"] = RewardTermCfg(
+        func=microduck_mdp.skill_contact_schedule,
+        weight=w["feet_contact"],
+        params={"sensor_name": "feet_ground_contact", "command_name": "skill"},
+    )
+    r["flight_height"] = RewardTermCfg(
+        func=microduck_mdp.skill_flight_height,
+        weight=w["flight_height"],
+        params={"std": FLIGHT_HEIGHT_STD, "command_name": "skill"},
+    )
+    r["takeoff_speed"] = RewardTermCfg(
+        func=microduck_mdp.skill_takeoff_speed_cost,
+        weight=-w["takeoff_speed"],
+        params={"max_speed": fl["max_takeoff_speed_mps"]},
+    )
+    r["flight_rotation"] = RewardTermCfg(
+        func=microduck_mdp.skill_flight_rotation_cost,
+        weight=-w["flight_rotation"],
+        params={"sensor_name": "feet_ground_contact", "command_name": "skill"},
+    )
+    r["landing_load"] = RewardTermCfg(
+        func=microduck_mdp.skill_landing_load_cost,
+        weight=-w["landing_load"],
+        params={
+            "sensor_name": "feet_ground_contact",
+            "limit_mg": fl["max_landing_load_mg"],
+            "soft_fraction": LANDING_SOFT_FRACTION,
+            "hard_gain": LANDING_HARD_GAIN,
+        },
+    )
+    if fl.get("toe_first", True) and w["toe_first"] > 0:
+        r["toe_first"] = RewardTermCfg(
+            func=microduck_mdp.skill_toe_first,
+            weight=w["toe_first"],
+            params={
+                "sensor_name": "feet_ground_contact",
+                "angle_scale_rad": TOE_ANGLE_SCALE_RAD,
+                "command_name": "skill",
+                "asset_cfg": SceneEntityCfg("robot", site_names=FOOT_SITES),
+            },
+        )
+    if w["joint_power"] > 0:
+        r["joint_power"] = RewardTermCfg(func=microduck_mdp.skill_joint_power_cost, weight=-w["joint_power"])
+    r["action_rate_l2"] = RewardTermCfg(
+        func=microduck_mdp.skill_action_rate,
+        weight=-w["action_rate"],
+        params={"fast_scale": FAST_ACTION_RATE_SCALE, "command_name": "skill"},
+    )
+    r["feet_flat"] = RewardTermCfg(
+        func=microduck_mdp.skill_feet_flat,
+        weight=FEET_FLAT_WEIGHT,
+        params={"sensor_name": "feet_ground_contact", "height_threshold": 0.02, "asset_cfg": feet},
+    )
+
+
+def _add_jump_events(cfg: ManagerBasedRlEnvCfg) -> None:
+    from mjlab.managers import EventTermCfg
+
+    from mjlab_microduck.robot.qdd_biped_constants import FOOT_GEOMS
+
+    cfg.events.pop("randomize_effort_limits", None)  # the driver clamp is fixed; the envelope varies
+    cfg.events["randomize_motor_envelope"] = EventTermCfg(
+        func=microduck_mdp.randomize_qdd_motor_envelope,
+        mode="reset",
+        params={"v_bus_range": MOTOR_V_BUS_RANGE, "strength_range": MOTOR_STRENGTH_RANGE},
+    )
+    cfg.events["foot_contact_solref"] = EventTermCfg(
+        func=microduck_mdp.randomize_geom_solref,
+        mode="reset",
+        params={
+            "timeconst_range": FOOT_SOLREF_TIMECONST_RANGE,
+            "dampratio_range": FOOT_SOLREF_DAMPRATIO_RANGE,
+            "asset_cfg": SceneEntityCfg("robot", geom_names=FOOT_GEOMS),
+        },
+    )
 
 
 def _skill_rl_cfg():
@@ -207,6 +352,20 @@ def _skill_rl_cfg():
 QddSkillRlCfg = _skill_rl_cfg()
 
 
+def _jump_rl_cfg():
+    from dataclasses import replace as dc_replace
+
+    return dc_replace(
+        QddSkillRlCfg,
+        experiment_name="qdd_biped_skill_hop",
+        run_name="qdd_biped_skill_hop",
+        max_iterations=800,
+    )
+
+
+QddJumpRlCfg = _jump_rl_cfg()
+
+
 # =============================================================================
 # Policy I/O contract for a skill policy (embedded in its ONNX)
 # =============================================================================
@@ -218,9 +377,18 @@ def build_skill_policy_io(spec: dict) -> dict:
 
     io = build_policy_io()
     total = qdd_skill.total_s(spec)
-    dt = io["policy_dt_s"]
-    io["task"] = TASK_ID
+    dt = spec.get("policy_dt_s", io["policy_dt_s"])
+    io["policy_dt_s"] = dt
+    io["control_rate_hz"] = round(1.0 / dt, 6)
+    flight = spec.get("flight")
+    io["task"] = JUMP_TASK_ID if flight is not None else TASK_ID
     io["kind"] = "skill"
+    if flight is not None:
+        io["actuators"]["torque_speed_envelope"] = (
+            "trained with the motors' torque-speed envelope (GIM6010-8: FOC voltage limit at 19.5-24 V, "
+            "no field weakening; GIM3510-8: linear to 0 at 42.4 rad/s x V / 24) inside +/- effort_limit; "
+            "the drivers' MIT torque range must be at least effort_limit (GDK468: 11 Nm)"
+        )
     for t in io["observation"]["terms"]:
         if t["name"] == "command":
             t["description"] = "always [0, 0, 0] for a skill policy (slot kept from the walking layout)"
@@ -246,9 +414,22 @@ def build_skill_policy_io(spec: dict) -> dict:
         "phase": "s = k / n_steps, k = 0 at the first observation of the skill; the policy was "
         "trained for s in [0, 1] only: stop the skill at k = n_steps",
         "last_action": "zeros at the start of the skill (like any policy start)",
-        "max_torso_pitch_deg": qdd_skill.TORSO_PITCH_RANGE_DEG[1],
+        "max_torso_pitch_deg": (
+            qdd_skill.FLIGHT_TORSO_PITCH_RANGE_DEG if flight is not None else qdd_skill.TORSO_PITCH_RANGE_DEG
+        )[1],
         "fall_termination_tilt_deg": FALL_TILT_DEG,
+        "policy_dt_s": dt,
     }
+    if flight is not None:
+        io["skill"]["contact_schedule"] = [dict(c) for c in spec["contact"]]
+        io["skill"]["flight"] = dict(flight)
+        io["skill"]["max_flight_s"] = qdd_skill.FLIGHT_TIME_RANGE_S[1]
+        io["skill"]["contact_note"] = (
+            "contact_schedule: t [s] since the skill started -> feet 'both' (both soles on the floor) / "
+            "'none' (flight); the policy may take off / land up to "
+            f"{qdd_skill.CONTACT_TOL_S} s early or late. The controller allows flight only inside "
+            "a scheduled flight (+ tolerance) and faults after max_flight_s airborne."
+        )
     io["gait_clock"] = {
         "period_s": 2.0 * total,
         "swing_fraction": 0.0,

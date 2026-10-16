@@ -8,13 +8,16 @@
 |---|---|
 | `src/mjlab_microduck/robot/qdd_biped/skills/skill_spec.schema.json` | 技の仕様の JSON Schema（形だけ。LLM の出力形式に使う） |
 | `src/mjlab_microduck/robot/qdd_biped/skills/bow.json` | 手で書いたお辞儀 |
+| `src/mjlab_microduck/robot/qdd_biped/skills/hop.json` | 両足ジャンプ（schema 2、重心 3 cm） |
+| `src/mjlab_microduck/actuator/qdd_motor.py` | トルク・速度の限界つきのモータ（跳ぶ技） |
+| `tests/test_qdd_hop.py` | schema 2・hop・モータの限界・跳ぶ技の環境 |
 | `src/mjlab_microduck/robot/qdd_biped/skills/warm_start/walk_gait2.onnx` | 初期値に使う歩行の方策（gait2） |
 | `src/mjlab_microduck/tasks/qdd_skill.py` | 仕様の読み込み・検証（関門）・参照軌道の生成 |
 | `src/mjlab_microduck/tasks/qdd_biped_skill_env_cfg.py` | 課題の設定、PPO の設定、技用の policy_io |
 | `src/mjlab_microduck/tasks/mdp.py`（末尾） | 技のクロックと参照（`SkillClockCommand`）、報酬、終了条件 |
 | `tests/test_qdd_skill.py` | 検証（良い例・悪い例）、参照、環境、policy_io、初期値の読み込み |
 
-## 技の仕様（schema_version 1）
+## 技の仕様（schema_version 1。跳ぶ技は下の schema_version 2）
 
 ```json
 {
@@ -74,6 +77,37 @@ yatai のハンドラは毎回まっさらに `train` を回し、チェック�
 - `commands` の範囲は全部 [0, 0]。
 
 技は total_s（= n_steps 回）で終わり、その後は学習していない（位相が 1 を越える）。止めるのはコントローラの役目。
+
+## 跳ぶ技（schema_version 2、Mjlab-Skill-Hop-QddBiped）
+
+両足ジャンプ（hop）のための拡張。version 1 の仕様はそのまま通る（接地はずっと両足、50 Hz）。根拠はロボットのリポジトリの `docs/jump-feasibility.md` と `analysis/hop.py`。
+
+```json
+{
+  "schema_version": 2, "name": "hop", "interpolation": "pchip", "policy_rate_hz": 50,
+  "contact": [{"t": 0.0, "feet": "both"}, {"t": 1.39, "feet": "none"}, {"t": 1.55, "feet": "both"}],
+  "flight": {"com_rise_m": 0.03, "max_takeoff_speed_mps": 0.85, "max_landing_load_mg": 4.0, "toe_first": true},
+  "keyframes": [...]
+}
+```
+
+- `contact`: 接地の予定。t = 0 は両足、`both` と `none`（空中）が交互、最後は両足。空中は 1 回 0.06〜0.3 秒（コントローラは 0.3 秒で故障）、最大 3 回。離陸は 0.5 秒以降、最後の着地から終わりまで 0.5 秒以上。片足だけの区間は書けない。
+- `flight`（空中があるときは必須）: 重心の上がる高さ（0.5〜4 cm）、離陸速度の上限（0.3〜0.9 m/s。重心 4 cm・0.9 m/s はモータバスの電流 LM5069 と着地のため）、片足あたりの着地荷重の上限（2〜4.5 mg。足首 GIM3510-8 のラジアル許容 300 N = 4.7 mg）、つま先から着地するか。空中の予定時間は弾道の 2 v0 / g と 0.06 秒以内で合っていること。
+- `interpolation: "pchip"`: 単調な 3 次補間。押し出しの途中のキーフレームで速さが 0 にならない（minjerk は毎回止まる）。
+- `policy_rate_hz`: 50 か 100。ONNX の policy_io の `policy_dt_s` に入る。
+- 区間ごとの関門: 離陸の 0.15 秒前〜着地の 0.25 秒後（速い区間）は、関節の速さ 20 rad/s まで、キーフレームの間隔 0.02 秒まで、胴体の傾きの速さ 6 rad/s まで。離陸〜着地の 0.25 秒後（空中と着地の区間）は、足裏を床に平らに置いた計算（胴体の高さ・傾き、足裏の平行、静的なバランス）を調べない。胴体の前傾の上限は 40 度（しゃがみ 35 度のため）。キーフレームの `torso` はこの区間には書けない。
+- 報酬の重みの追加: `flight_height`、`flight_rotation`、`landing_load`、`toe_first`、`takeoff_speed`、`joint_power`（空中があるときだけ使う）。`feet_contact` は接地の予定に従う報酬の重みになる。
+
+### 課題（Mjlab-Skill-Hop-QddBiped、`skills/hop.json`）
+
+yatai は環境変数を渡せないので、跳ぶ技は自分の課題 ID を持つ（`skills/hop.json` を学習する）。
+
+- 物理 2.5 ms（足首の陽的 PD が 5 ms では不安定）、50 Hz なら decimation 8。
+- アクチュエータ（`actuator/qdd_motor.py`）: ドライバの PD をそのまま陽に計算し、モータのトルク・速度の限界で切る（`analysis/hop.py` の `tmax()`。GIM6010-8 は FOC の電圧の限界・弱め界磁なし、22 V で 10 / 15 / 20 rad/s のとき 7.6 / 5.6 / 4.1 Nm。GIM3510-8 は 42.4 rad/s × V / 24 で 0 になる直線）。ブレーキ側（逆駆動）はドライバの範囲 11 / 6.28 Nm まで。
+- 報酬（歩行の技の報酬に加えて）: 重心の高さの追従（押し出し〜空中、空中は目標の高さまでの弾道。高く跳んでも得をしない）、接地の予定（予定どおり両足が床 / 両足が空中。離陸・着地の前後 0.04 秒は左右そろっていれば満点、片足だけは 0）、離陸速度が上限を超えたら罰、空中の胴体の傾きの速さの罰、片足ごとの着地荷重（物理の 8 ステップの最大、上限の 0.6 倍から 2 乗、上限から 10 倍）、つま先から着地（着地の瞬間の足裏のつま先下がりの角度）、モータの出力（τ·ω の正の部分）。空中と着地の区間は、胴体の傾き・高さの参照と、足裏を平らにする罰を止める。速い区間は関節の追従を 2 倍ゆるく、行動の変化の罰を 0.1 倍にする。
+- 参照の途中から始める（RSI）のは速い区間の外だけ。
+- ドメインランダム化の追加: 足裏と床の接触の硬さ（solref の時定数 6〜30 ms、減衰比 0.7〜1.2：床とパッド）、モータバスの電圧 19.5〜24 V、モータの強さ ±10 %（トルクの上下限 GDK の 11 Nm はそのまま）。指令の遅れ 0〜10 ms は歩行と同じ。
+- 2026-10-16 にロボットのリポジトリで足裏に 10 mm の TPU パッドが付いた（`ankle_to_sole` 0.040 → 0.050、6.623 kg）。`qdd_biped.xml` を作り直し、立ち姿勢の胴体の高さは 0.3542 m。歩行の方策（gait3 まで）はパッドなしで学習している。
 
 ## 結果（bow、2026-10-16）
 

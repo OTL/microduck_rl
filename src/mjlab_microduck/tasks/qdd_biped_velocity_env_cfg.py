@@ -347,7 +347,7 @@ def make_qdd_biped_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.terminations["fell_over"].params["limit_angle"] = math.radians(60.0)
     cfg.terminations["torso_low"] = TerminationTermCfg(
         func=mdp.root_height_below_minimum,
-        params={"minimum_height": 0.20},  # standing 0.344, full 120 deg crouch ~0.23
+        params={"minimum_height": 0.20},  # standing 0.354, full 120 deg crouch ~0.24
     )
     cfg.terminations["body_ground_contact"] = TerminationTermCfg(
         func=mdp.illegal_contact,
