@@ -34,6 +34,7 @@ from mjlab_microduck.tasks import mdp as microduck_mdp
 from mjlab_microduck.tasks.qdd_biped_skill_env_cfg import JUMP_SPEC, make_qdd_biped_skill_env_cfg
 
 V_BUS = 22.0
+SETTLE_SKIP_S = 0.3  # ignore the first 0.3 s (spawn drop) for flights and peaks
 
 
 def run(onnx_path: str, play: bool, n_envs: int, seed: int = 0) -> dict:
@@ -54,7 +55,7 @@ def run(onnx_path: str, play: bool, n_envs: int, seed: int = 0) -> dict:
     nj = len(robot.joint_names)
     B = n_envs
 
-    sub = dict(w=torch.zeros(B, nj), tau=torch.zeros(B, nj), util=torch.zeros(B, nj), bus=[])
+    sub = dict(w=[], tau=[], util=[], bus=[])
     orig_step = env.sim.step
 
     def step_hook():
@@ -65,13 +66,13 @@ def run(onnx_path: str, play: bool, n_envs: int, seed: int = 0) -> dict:
             if getattr(a, "_vel", None) is not None:
                 w[:, a.target_ids] = a._vel
         tau = robot.data.qfrc_actuator.clone()
-        sub["w"] = torch.maximum(sub["w"], w.abs())
-        sub["tau"] = torch.maximum(sub["tau"], tau.abs())
+        sub["w"].append(w.abs())
+        sub["tau"].append(tau.abs())
         lim = torch.where(ankle, motoring_limit("3510", w, torch.tensor(V_BUS)), motoring_limit("6010", w, torch.tensor(V_BUS)))
         lim = torch.minimum(lim, torch.where(ankle, torch.tensor(6.28), torch.tensor(11.0)))
         motoring = tau * w > 0
         util = torch.where(motoring, tau.abs() / lim.clamp(min=1e-3), torch.zeros_like(tau))
-        sub["util"] = torch.maximum(sub["util"], util)
+        sub["util"].append(util)
         p6010 = tau * w + 1.5 * R_PH_6010 * (tau / KT_6010) ** 2
         pank = torch.where(tau * w > 0, tau * w / 0.7, tau * w * 0.7)
         p = torch.where(ankle, pank, p6010).sum(dim=1)
@@ -113,7 +114,11 @@ def run(onnx_path: str, play: bool, n_envs: int, seed: int = 0) -> dict:
     fz = torch.cat(rec["fz"], dim=2) / mg  # [B, 2, n*H] substep forces in m g
     sole = torch.stack(rec["sole_z"], 1)
     pitch = torch.stack(rec["pitch"], 1)
+    skip = round(SETTLE_SKIP_S / dt_sub)  # spawn transient (dropped from 5-10 mm, PD settling)
     bus = torch.stack(sub["bus"], 1)  # [B, n*H]
+    bus[:, :skip] = 0.0
+    for key in ("w", "tau", "util"):
+        sub[key] = torch.stack(sub[key][skip:], 1).amax(dim=1)
     nav = max(1, round(0.005 / dt_sub))
     kern = torch.ones(1, 1, nav) / nav
     fz5 = torch.nn.functional.conv1d(fz.reshape(-1, 1, fz.shape[-1]), kern).reshape(B, 2, -1)
@@ -121,6 +126,7 @@ def run(onnx_path: str, play: bool, n_envs: int, seed: int = 0) -> dict:
     out = []
     for b in range(B):
         air = (fz[b].sum(0) < 1e-4).numpy()  # substeps with both soles off
+        air[:skip] = False
         # flights = runs of air of >= 4 substeps (10 ms)
         flights = []
         i = 0
