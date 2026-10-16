@@ -67,7 +67,11 @@ the keyframe interpolation; the keyframes stay as the human-readable outline. Ga
 format, joint order, finite values, standing pose at rest with tau_ff = 0 at both
 ends, |tau_ff| <= TABLE_TAU_FRACTION x peak, residual_scale in TABLE_RESIDUAL_RANGE,
 take-off / touchdown of the table within CONTACT_TOL_S of the contact schedule, and
-the dense-reference checks below on the table's q.
+the dense-reference checks below on the table's q. Optional: ``residual_scale_joints``
+[n, 10] per-joint factors in TABLE_JOINT_RESIDUAL_RANGE on top of residual_scale (the
+hop shrinks the hip-pitch residual near its -100 deg limit) and ``foot_clear_m``, the
+planned foot clearance (lowest sole point above the floor in flight; the target of
+the foot_clearance reward).
 
 CLI:  python -m mjlab_microduck.tasks.qdd_skill <spec.json> [...]   (exit 1 on errors)
 """
@@ -147,6 +151,8 @@ TABLE_DT_RANGE_S = (0.001, 0.02)
 TABLE_TAU_FRACTION = 0.8  # |tau_ff| <= 0.8 x motor peak (the PD needs some headroom)
 TABLE_RESIDUAL_RANGE = (0.1, 1.0)
 TABLE_END_TOL = 1e-3  # rad / rad/s / N m at the first and last row
+TABLE_JOINT_RESIDUAL_RANGE = (0.1, 1.0)  # optional per-joint factor (residual_scale_joints)
+TABLE_FOOT_CLEAR_RANGE_M = (0.0, 0.12)  # optional planned foot clearance (foot_clear_m)
 
 # Reward weights a spec may set: name -> (min, max, default). Penalties are given
 # as magnitudes (the task applies them with a negative sign). Balance / contact /
@@ -169,6 +175,9 @@ REWARD_WEIGHT_BOUNDS: dict[str, tuple[float, float, float]] = {
     "toe_first": (0.0, 2.0, 0.5),
     "takeoff_speed": (1.0, 20.0, 10.0),
     "joint_power": (0.0, 5.0e-3, 1.0e-3),
+    # feed-forward jumps: lowest sole point above the floor in flight (main height objective of
+    # a table with foot_clear_m; 0 = off)
+    "foot_clearance": (0.0, 10.0, 0.0),
 }
 
 TOP_KEYS = {
@@ -1039,7 +1048,22 @@ def _validate_table(name, duration, settle, dt_policy: float, flights, errors: l
             )
     if len(errors) > n_err:
         return None
-    return {
+    rsj = None
+    if raw.get("residual_scale_joints") is not None:
+        try:
+            rsj = np.asarray(raw["residual_scale_joints"], dtype=float)
+        except (TypeError, ValueError):
+            rsj = np.zeros((0,))
+        if rsj.ndim != 2 or rsj.shape != (n_rows, len(names)) or not np.all(np.isfinite(rsj)):
+            errors.append(f"reference_table.residual_scale_joints: must be finite, [{n_rows}, {len(names)}]")
+        elif rsj.min() < TABLE_JOINT_RESIDUAL_RANGE[0] - 1e-9 or rsj.max() > TABLE_JOINT_RESIDUAL_RANGE[1] + 1e-9:
+            errors.append(f"reference_table.residual_scale_joints: must be in {list(TABLE_JOINT_RESIDUAL_RANGE)}")
+    fc = raw.get("foot_clear_m")
+    if fc is not None and (not _is_number(fc) or not TABLE_FOOT_CLEAR_RANGE_M[0] < float(fc) <= TABLE_FOOT_CLEAR_RANGE_M[1]):
+        errors.append(f"reference_table.foot_clear_m: {fc!r} must be in {list(TABLE_FOOT_CLEAR_RANGE_M)} m")
+    if len(errors) > n_err:
+        return None
+    out = {
         "name": name,
         "dt": dt,
         "q": arrs["q"],
@@ -1048,8 +1072,15 @@ def _validate_table(name, duration, settle, dt_policy: float, flights, errors: l
         "residual_scale": arrs["residual_scale"],
         "text": text,
         "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
-        "meta": {k: raw[k] for k in ("rise_m", "takeoff_speed_mps", "t_takeoff", "t_touchdown") if k in raw},
+        "meta": {
+            k: raw[k]
+            for k in ("rise_m", "takeoff_speed_mps", "t_takeoff", "t_touchdown", "foot_clear_m", "t_foot_clear")
+            if k in raw
+        },
     }
+    if rsj is not None:
+        out["residual_scale_joints"] = rsj
+    return out
 
 
 def check_reference(ref: dict, errors: list[str], flight: bool = False) -> None:

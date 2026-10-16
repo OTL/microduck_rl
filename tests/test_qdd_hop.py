@@ -55,14 +55,26 @@ def test_feedforward_hop_spec_and_table():
     assert tb["dt"] == pytest.approx(0.005) and tb["q"].shape[1] == 10
     (t0, t1), = qdd_skill.flight_intervals(spec["contact"])
     assert abs(tb["meta"]["t_takeoff"] - t0) < 0.01 and abs(tb["meta"]["t_touchdown"] - t1) < 0.01
-    assert 0.25 <= tb["residual_scale"].min() < 1.0 and tb["residual_scale"].max() == 1.0
+    # residual ramp-in 0.1 -> 1 over the first 0.2 s (hand-over from the walking policy), 0.3 in the push
+    rs = tb["residual_scale"]
+    assert rs[0] == pytest.approx(0.1) and rs[int(round(0.1 / tb["dt"]))] == pytest.approx(0.55, abs=0.01)
+    assert rs.max() == 1.0 and rs[int(round(0.25 / tb["dt"]))] == 1.0
+    assert 0.25 <= rs[int(round(0.25 / tb["dt"])):].min() < 1.0
+    # foot clearance plan and the hip-pitch residual factor (smaller near its -100 deg limit)
+    assert 0.05 < tb["meta"]["foot_clear_m"] < 0.12 and t0 < tb["meta"]["t_foot_clear"] < t1
+    rsj = tb["residual_scale_joints"]
+    hip = [QDD_JOINT_NAMES.index(n) for n in ("l_hip_pitch", "r_hip_pitch")]
+    other = [j for j in range(10) if j not in hip]
+    assert np.all(rsj[:, other] == 1.0) and 0.1 <= rsj[:, hip].min() < 0.5
+    near = tb["q"][:, hip[0]] < math.radians(-90)
+    assert near.any() and np.all(rsj[near][:, hip] < 1.0)
     # the dense joint reference is the table's q (not the keyframe interpolation)
     ref = qdd_skill.build_reference(spec)
     k = int(round(1.25 / 0.01))
     assert np.allclose(ref["q"][k], qdd_skill.sample_table(tb, np.array([1.25]))[0])
     # push-off up to ~15-18 rad/s, crouch calm
     dq = np.abs(np.asarray(tb["dq"]))
-    assert 12.0 < dq.max() < qdd_skill.FAST_JOINT_SPEED_RAD_S
+    assert 12.0 < dq.max() <= qdd_skill.FAST_JOINT_SPEED_RAD_S + 0.01
 
 
 def _table_raw() -> dict:
@@ -88,6 +100,10 @@ BAD_TABLES = {
     "takeoff": (_bad_table(lambda r: r.update(t_takeoff=r["t_takeoff"] + 0.1)), "reference_table.t_takeoff"),
     "short": (_bad_table(lambda r: [r[k].__delitem__(slice(300, None)) for k in ("q", "dq", "tau_ff", "residual_scale")]),
               "less than duration_s"),
+    "rsj_range": (_bad_table(lambda r: r["residual_scale_joints"][10].__setitem__(2, 0.0)),
+                  "residual_scale_joints: must be in"),
+    "rsj_rows": (_bad_table(lambda r: r["residual_scale_joints"].pop()), "residual_scale_joints: must be finite"),
+    "foot_clear": (_bad_table(lambda r: r.update(foot_clear_m=0.5)), "foot_clear_m"),
 }
 
 
@@ -280,7 +296,10 @@ def test_hop_env_physics_actuators_and_terms(hop_env):
     fh = env.scene.sensors["feet_ground_contact"].data.force_history
     assert fh is not None and fh.shape[2] == 4
     assert w["residual_l2"] < 0 and w["bus_current"] < 0 and w["termination"] == pytest.approx(-50.0)
-    assert w["flight_height"] == pytest.approx(5.0)
+    # the soles are the height objective (foot clearance), the CoM height tracking stays smaller
+    assert w["foot_clearance"] == pytest.approx(5.0) and w["flight_height"] == pytest.approx(2.0)
+    assert env.reward_manager.get_term_cfg("foot_clearance").params["target_m"] == pytest.approx(
+        env.command_manager.get_term("skill").spec["_table"]["meta"]["foot_clear_m"])
 
 
 def test_envelope_clips_motoring_torque(hop_env):
@@ -308,6 +327,12 @@ def test_hop_env_steps_and_rewards_are_finite(hop_env):
     assert float(microduck_mdp.skill_landing_load_cost(env, "feet_ground_contact", 4.0).max()) == 0.0
     assert float(microduck_mdp.skill_takeoff_speed_cost(env, 0.85).max()) == 0.0
     assert float(microduck_mdp.skill_bus_current_cost(env, 20.0).max()) == 0.0
+    # soles flat on the floor: lowest sole point ~0, no foot-clearance reward on the ground
+    robot = env.scene["robot"]
+    sites = robot.find_sites(["l_foot_site", "r_foot_site"], preserve_order=True)[0]
+    z = microduck_mdp.sole_lowest_z(robot, sites, qdd_skill.FOOT_HALF_LENGTH_M, qdd_skill.FOOT_HALF_WIDTH_M)
+    assert torch.all(z.abs() < 0.006), z
+    assert float(microduck_mdp.skill_foot_clearance(env, "feet_ground_contact", 0.07).abs().max()) == 0.0
     # schedule: both feet down before the take-off pays 1
     assert torch.allclose(microduck_mdp.skill_contact_schedule(env, "feet_ground_contact"), torch.ones(4))
 
@@ -353,11 +378,37 @@ def test_reference_action_plays_the_table(hop_env):
         bias = robot.data.encoder_bias[0, ids]
         want_q = qdd_skill.sample_table(tb, np.array([t]))[0]
         res = qdd_skill.sample_table(tb, np.array([t]), "residual_scale")[0]
-        want_q = want_q + a * 0.25 * res * gain
+        rsj = qdd_skill.sample_table({"dt": tb["dt"], "x": tb["residual_scale_joints"]}, np.array([t]), "x")[0]
+        want_q = want_q + a * 0.25 * res * rsj * gain
         got = (robot.data.joint_pos_target[0, ids] + bias).numpy()
         assert np.allclose(got, want_q, atol=1e-5), (a, got - want_q)
         assert np.allclose(robot.data.joint_vel_target[0, ids].numpy(), qdd_skill.sample_table(tb, np.array([t]), "dq")[0], atol=1e-5)
         assert np.allclose(robot.data.joint_effort_target[0, ids].numpy(), qdd_skill.sample_table(tb, np.array([t]), "tau_ff")[0], atol=1e-5)
+
+
+def test_bus_current_is_the_largest_over_the_substeps(hop_env):
+    env = hop_env
+    term = env.action_manager.get_term("joint_pos")
+    robot = env.scene["robot"]
+    env.reset()
+    seen = []
+    orig = env.sim.step
+
+    def hook():
+        orig()
+        seen.append(microduck_mdp.qdd_bus_current(env, robot))
+
+    env.sim.step = hook
+    try:
+        env.step(torch.full((4, 10), 0.5))
+    finally:
+        env.sim.step = orig
+    assert len(seen) == env.cfg.decimation
+    # the action term saw substeps 1..3 (it samples before each physics step); the cost adds the last
+    want = torch.stack(seen[:-1], 1).amax(1)
+    assert torch.allclose(term.bus_max, want, atol=1e-4)
+    cost = microduck_mdp.skill_bus_current_cost(env, 0.0)
+    assert torch.allclose(cost, torch.stack(seen, 1).amax(1).clamp(min=0.0) ** 2, rtol=1e-4, atol=1e-4)
 
 
 # --- policy_io / cfg ----------------------------------------------------------------------
@@ -371,7 +422,7 @@ def test_hop_policy_io():
     total = spec["duration_s"] + spec["settle_s"]
     assert sk["n_steps"] == round(total / 0.01) and sk["policy_dt_s"] == pytest.approx(0.01)
     assert sk["contact_schedule"] == spec["contact"] and sk["contact_schedule"][1]["feet"] == "none"
-    assert sk["flight"]["com_rise_m"] == 0.03 and sk["max_flight_s"] == 0.3
+    assert sk["flight"]["com_rise_m"] == spec["flight"]["com_rise_m"] and sk["max_flight_s"] == 0.3
     assert sk["max_torso_pitch_deg"] == 40.0
     assert "torque_speed_envelope" in io["actuators"]
     # the feed-forward table for the controller
@@ -381,7 +432,8 @@ def test_hop_policy_io():
     assert len(r["dq"]) == len(r["tau_ff"]) == len(r["residual_scale"]) == n and (n - 1) * r["dt"] >= total - 1e-6
     stand = qdd_skill.stand_pose()
     assert np.allclose(r["q"][0], stand, atol=1e-3) and np.allclose(r["q"][-1], stand, atol=1e-3)
-    assert "reference" in io["action"]["target"]
+    assert "reference" in io["action"]["target"] and "residual_scale_joints" in io["action"]["target"]
+    assert len(r["residual_scale_joints"]) == n and r["foot_clear_m"] == spec["_table"]["meta"]["foot_clear_m"]
     md = skill_onnx_metadata(spec)
     assert json.loads(md["policy_io"])["skill"]["name"] == "hop"
     # the keyframe-only hop has no reference

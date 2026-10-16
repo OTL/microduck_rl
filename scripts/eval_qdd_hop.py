@@ -5,8 +5,9 @@
 
 One skill execution per env from the standing pose (no RSI). Per env:
   - CoM rise: highest whole-robot CoM after take-off minus the CoM at take-off, and
-    minus the standing CoM; take-off speed (max CoM vz); foot clearance (lowest sole
-    point at the apex of the flight, both soles off the floor)
+    minus the standing CoM; take-off speed (max CoM vz); foot clearance: the largest
+    height, over the flight, of the lowest point of both soles (corners of the 150 x 70 mm
+    soles, every physics substep)
   - flight time (both soles off the floor, physics-substep resolution, 2.5 ms)
   - landing load per foot: peak 5 ms average vertical ground force / (m g)
   - joint peak speed / torque, and the peak use of the torque-speed envelope
@@ -33,6 +34,7 @@ from mjlab.envs import ManagerBasedRlEnv
 from mjlab_microduck.actuator.qdd_motor import KT_6010, R_PH_6010, motoring_limit
 from mjlab_microduck.tasks import mdp as microduck_mdp
 from mjlab_microduck.tasks.qdd_biped_skill_env_cfg import JUMP_SPEC, make_qdd_biped_skill_env_cfg
+from mjlab_microduck.tasks.qdd_skill import FOOT_HALF_LENGTH_M, FOOT_HALF_WIDTH_M
 
 V_BUS = 22.0
 SETTLE_SKIP_S = 0.3  # ignore the first 0.3 s (spawn drop) for flights and peaks
@@ -56,7 +58,7 @@ def run(onnx_path: str, play: bool, n_envs: int, seed: int = 0) -> dict:
     nj = len(robot.joint_names)
     B = n_envs
 
-    sub = dict(w=[], tau=[], util=[], bus=[])
+    sub = dict(w=[], tau=[], util=[], bus=[], sole=[])
     orig_step = env.sim.step
 
     def step_hook():
@@ -78,6 +80,7 @@ def run(onnx_path: str, play: bool, n_envs: int, seed: int = 0) -> dict:
         pank = torch.where(tau * w > 0, tau * w / 0.7, tau * w * 0.7)
         p = torch.where(ankle, pank, p6010).sum(dim=1)
         sub["bus"].append(p / V_BUS)
+        sub["sole"].append(microduck_mdp.sole_lowest_z(robot, sites, FOOT_HALF_LENGTH_M, FOOT_HALF_WIDTH_M))
 
     env.sim.step = step_hook
     obs, _ = env.reset()
@@ -120,6 +123,7 @@ def run(onnx_path: str, play: bool, n_envs: int, seed: int = 0) -> dict:
     pitch = torch.stack(rec["pitch"], 1)
     skip = round(SETTLE_SKIP_S / dt_sub)  # spawn transient (dropped from 5-10 mm, PD settling)
     bus = torch.stack(sub["bus"], 1)  # [B, n*H]
+    sole_sub = torch.stack(sub["sole"], 1)  # [B, n*H] lowest sole point (both feet)
     bus[:, :skip] = 0.0
     for key in ("w", "tau", "util"):
         sub[key] = torch.stack(sub[key][skip:], 1).amax(dim=1)
@@ -152,7 +156,8 @@ def run(onnx_path: str, play: bool, n_envs: int, seed: int = 0) -> dict:
             z_to = float(com_z[b, max(k0 - 1, 0)])
             r["com_rise_cm"] = 100 * (float(com_z[b, k0 : k1 + 1].max()) - z_to)
             r["com_rise_stand_cm"] = 100 * (float(com_z[b, k0 : k1 + 1].max()) - float(com_stand[b]))
-            r["foot_clear_cm"] = 100 * float(sole[b, k0 : k1 + 1].max())
+            r["foot_clear_cm"] = 100 * float(sole_sub[b, i0:i1].max())
+            r["foot_clear_site_cm"] = 100 * float(sole[b, k0 : k1 + 1].max())  # previous measure (sole centres)
             r["pitch_change_flight_deg"] = float(pitch[b, k0 : k1 + 1].max() - pitch[b, k0 : k1 + 1].min())
             r["t_takeoff"] = i0 * dt_sub
             ld = slice(min(i1, fz5.shape[-1] - 1), min(i1 + round(0.15 / dt_sub), fz5.shape[-1]))

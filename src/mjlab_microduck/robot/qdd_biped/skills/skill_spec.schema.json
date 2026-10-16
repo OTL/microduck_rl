@@ -159,6 +159,13 @@
           "minimum": 0.0,
           "maximum": 0.005,
           "default": 0.001
+        },
+        "foot_clearance": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 10.0,
+          "default": 0.0,
+          "description": "feed-forward jumps with a planned foot clearance (reference table foot_clear_m): lowest sole point above the floor while airborne"
         }
       }
     },

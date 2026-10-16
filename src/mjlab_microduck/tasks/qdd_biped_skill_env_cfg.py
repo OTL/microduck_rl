@@ -50,6 +50,12 @@ scratch with a near-zero output layer (zero residual = the table alone, which ho
 RSI concentrates on the crouch just before the push (episodes centred on the hop),
 no RSI inside the jump; smaller fall penalty; a small residual-magnitude cost; the
 residual gain ramps from REF_RESIDUAL_GAIN_START to 1 over the first iterations.
+Motor bus current cost above 20 A on the largest current over the physics substeps
+(the action term records every substep). Tables planned for foot clearance
+(foot_clear_m, robot repo docs/jump-feasibility.md 10.): foot-clearance reward (lowest
+sole point while airborne / plan, capped) as the main height objective, the CoM height
+tracking stays with a smaller weight; per-joint residual factors of the table
+(residual_scale_joints) and its residual ramp-in at the skill start are applied as given.
 """
 
 from __future__ import annotations
@@ -121,7 +127,8 @@ REF_RSI_FOCUS_LEAD_S = 0.5  # focus window = [push start - this, push start - 0.
 REF_TERMINATION_WEIGHT = -50.0  # x dt (10 ms) = -0.5 per fall
 REF_RESIDUAL_WEIGHT = 0.05  # |a|^2 cost
 REF_BUS_THRESHOLD_A = 20.0  # bus current cost above this (LM5069 trips at 32-41 A)
-REF_BUS_WEIGHT = 0.05  # x relu(I - 20 A)^2
+REF_BUS_WEIGHT = 0.05  # x relu(I - 20 A)^2, I = largest over the physics substeps of the step
+FOOT_CLEARANCE_CAP = 1.25  # foot clearance reward saturates at 1.25 x the table's plan
 REF_RESIDUAL_GAIN_START = 0.5
 REF_RESIDUAL_RAMP_ITERS = 300
 REF_INIT_STD = 0.5
@@ -283,16 +290,33 @@ def _make_reference_action(cfg: ManagerBasedRlEnvCfg, spec: dict, play: bool) ->
     r["bus_current"] = RewardTermCfg(
         func=microduck_mdp.skill_bus_current_cost, weight=-REF_BUS_WEIGHT, params={"threshold_a": REF_BUS_THRESHOLD_A}
     )
+    clear = spec["_table"]["meta"].get("foot_clear_m")
+    w = spec["reward_weights"].get("foot_clearance", 0.0)
+    if clear and w > 0:
+        # main height objective of a table planned for foot clearance (robot repo docs/jump-feasibility.md 10.)
+        r["foot_clearance"] = RewardTermCfg(
+            func=microduck_mdp.skill_foot_clearance,
+            weight=w,
+            params={
+                "sensor_name": "feet_ground_contact",
+                "target_m": float(clear),
+                "cap": FOOT_CLEARANCE_CAP,
+                "asset_cfg": SceneEntityCfg("robot", site_names=FOOT_SITES),
+            },
+        )
 
 
 def _push_start(spec: dict) -> float:
     """Start of the push-off in the table: the first row with residual_scale < 1 (the
-    table lowers it from just before the push), else take-off - FAST_PRE_S."""
+    table lowers it from just before the push) after the residual ramp-in at the skill
+    start, else take-off - FAST_PRE_S."""
     import numpy as np
 
     tb = spec["_table"]
     rs = np.asarray(tb["residual_scale"])
-    low = np.flatnonzero(rs < 0.999)
+    full = np.flatnonzero(rs >= 0.999)
+    k1 = int(full[0]) if len(full) else 0
+    low = k1 + np.flatnonzero(rs[k1:] < 0.999)
     t_to = qdd_skill.flight_intervals(spec["contact"])[0][0]
     return float(low[0] * tb["dt"]) if len(low) else t_to - qdd_skill.FAST_PRE_S
 
@@ -549,7 +573,8 @@ def _add_reference_io(io: dict, spec: dict) -> None:
     r = lambda a, d: [[round(float(x), d) for x in row] for row in a]  # noqa: E731
     io["action"]["target"] = (
         "skill with a feed-forward table (skill.reference): q_target = reference.q(t) + scale * "
-        "reference.residual_scale(t) * action, velocity target reference.dq(t), torque feed-forward "
+        "reference.residual_scale(t) * reference.residual_scale_joints(t)[j] * action (the per-joint factor "
+        "is 1 when the table has none), velocity target reference.dq(t), torque feed-forward "
         "reference.tau_ff(t) (driver MIT: tau = kp (q_target - q) + kd (dq_target - dq) + tau_ff)"
     )
     io["skill"]["reference"] = {
@@ -567,6 +592,8 @@ def _add_reference_io(io: dict, spec: dict) -> None:
         "residual_scale": [round(float(x), 3) for x in tb["residual_scale"]],
         **{k: v for k, v in tb["meta"].items()},
     }
+    if tb.get("residual_scale_joints") is not None:
+        io["skill"]["reference"]["residual_scale_joints"] = r(tb["residual_scale_joints"], 3)
 
 
 def skill_policy_io_json(spec: dict) -> str:

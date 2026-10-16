@@ -8625,7 +8625,16 @@ class SkillReferenceJointPositionAction(_JointAction):
         self.ref_dq = f(qdd_skill.sample_table(table, t, "dq")[:, order])
         self.ref_tau = f(qdd_skill.sample_table(table, t, "tau_ff")[:, order])
         self.ref_res = f(qdd_skill.sample_table(table, t, "residual_scale"))
+        if table.get("residual_scale_joints") is not None:
+            # per-joint factor (e.g. the hip pitch residual shrinks near its -100 deg limit)
+            self.ref_rsj = f(qdd_skill.sample_table({"dt": table["dt"], "rsj": table["residual_scale_joints"]}, t,
+                                                    "rsj")[:, order])
+        else:
+            self.ref_rsj = torch.ones_like(self.ref_q)
         self._n_sub = n_sub
+        # motor bus current (analysis/hop.py electrical model), max over the physics substeps of
+        # the current policy step (skill_bus_current_cost)
+        self.bus_max = torch.zeros(env.num_envs, device=self.device)
         self._sub = 0
         self.residual_gain = float(cfg.residual_gain)
         self.zero_residual = bool(cfg.zero_residual)
@@ -8633,6 +8642,7 @@ class SkillReferenceJointPositionAction(_JointAction):
     def process_actions(self, actions: torch.Tensor):
         self._raw_actions[:] = actions
         self._sub = 0
+        self.bus_max.zero_()
 
     def _index(self) -> torch.Tensor:
         sk = _qdd_skill(self._env_ref, self.cfg.command_name)
@@ -8640,8 +8650,10 @@ class SkillReferenceJointPositionAction(_JointAction):
         return torch.clamp(k, 0, self._n_sub - 1)
 
     def apply_actions(self) -> None:
+        # bus current of the physics step just taken (torque applied there, speed after it)
+        self.bus_max = torch.maximum(self.bus_max, qdd_bus_current(self._env_ref, self._entity))
         i = self._index()
-        res = self.ref_res[i].unsqueeze(1) * (self._scale * self.residual_gain)
+        res = self.ref_res[i].unsqueeze(1) * self.ref_rsj[i] * (self._scale * self.residual_gain)
         a = torch.zeros_like(self._raw_actions) if self.zero_residual else self._raw_actions
         target = self.ref_q[i] + res * a
         self._processed_actions = target
@@ -8685,19 +8697,12 @@ def skill_residual_gain_curriculum(
     return torch.tensor(term.residual_gain)
 
 
-def skill_bus_current_cost(
-    env: ManagerBasedRlEnv,
-    threshold_a: float = 20.0,
-    v_bus: float = 22.0,
-    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-) -> torch.Tensor:
-    """COST (>= 0): relu(I_bus - threshold)^2 [A^2], I_bus = motor bus current of the
-    electrical model of the robot repo's analysis/hop.py (GIM6010-8: tau w + 1.5 R
-    (tau / Kt)^2, GIM3510-8: tau w / 0.7 motoring, x 0.7 braking; / v_bus). The
-    LM5069 hot-swap trips at 32-41 A for 4.7 ms: keep the hop well below."""
+def qdd_bus_current(env: ManagerBasedRlEnv, asset: Entity, v_bus: float = 22.0) -> torch.Tensor:
+    """[B] motor bus current [A] now: electrical model of the robot repo's analysis/hop.py
+    (GIM6010-8: tau w + 1.5 R (tau / Kt)^2, GIM3510-8: tau w / 0.7 motoring, x 0.7
+    braking; / v_bus) on the applied joint torques and speeds."""
     from mjlab_microduck.actuator.qdd_motor import KT_6010, R_PH_6010
 
-    asset: Entity = env.scene[asset_cfg.name]
     cache = env.__dict__.setdefault("_qdd_ankle_mask", {})
     if id(asset) not in cache:
         cache[id(asset)] = torch.tensor(
@@ -8709,6 +8714,67 @@ def skill_bus_current_cost(
     p6010 = tau * w + 1.5 * R_PH_6010 * torch.square(tau / KT_6010)
     pm = tau * w
     pank = torch.where(pm > 0, pm / 0.7, pm * 0.7)
-    i_bus = torch.where(ankle, pank, p6010).sum(dim=1) / v_bus
-    env.extras["log"]["Metrics/hop_bus_a_max"] = torch.nan_to_num(i_bus).max()
+    return torch.nan_to_num(torch.where(ankle, pank, p6010).sum(dim=1) / v_bus)
+
+
+def skill_bus_current_cost(
+    env: ManagerBasedRlEnv,
+    threshold_a: float = 20.0,
+    v_bus: float = 22.0,
+    action_name: str = "joint_pos",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """COST (>= 0): relu(I_bus - threshold)^2 [A^2], I_bus = motor bus current
+    (qdd_bus_current), the largest over the physics substeps of this policy step when the
+    action is SkillReferenceJointPositionAction (it records every substep; the policy step
+    alone samples 1 of 4 and missed the short peaks), else at the end of the step. The
+    LM5069 hot-swap trips at 32-41 A for 4.7 ms: keep the hop well below."""
+    asset: Entity = env.scene[asset_cfg.name]
+    i_bus = qdd_bus_current(env, asset, v_bus)
+    term = env.action_manager.get_term(action_name)
+    if isinstance(term, SkillReferenceJointPositionAction):
+        i_bus = torch.maximum(i_bus, term.bus_max)
+    env.extras["log"]["Metrics/hop_bus_a_max"] = i_bus.max()
     return torch.nan_to_num(torch.square(torch.clamp(i_bus - threshold_a, min=0.0)), nan=0.0)
+
+
+def skill_foot_clearance(
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    target_m: float,
+    cap: float = 1.25,
+    command_name: str = "skill",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """REWARD in [0, cap] while both soles are off the floor in the flight window (scheduled
+    flight + landing window): height of the lowest point of both soles (corners of the
+    150 x 70 mm soles at the foot sites) above the floor / target_m (the table's planned
+    foot clearance). Pays for lifting the feet (CoM rise + tucking the legs), not for the
+    CoM alone (docs/qdd_skill.md, robot repo docs/jump-feasibility.md 10.)."""
+    from mjlab.sensor import ContactSensor
+
+    from mjlab_microduck.tasks.qdd_skill import FOOT_HALF_LENGTH_M, FOOT_HALF_WIDTH_M
+
+    sk = _qdd_skill(env, command_name)
+    asset: Entity = env.scene[asset_cfg.name]
+    sensor: ContactSensor = env.scene[sensor_name]
+    assert sensor.data.found is not None
+    z = sole_lowest_z(asset, asset_cfg.site_ids, FOOT_HALF_LENGTH_M, FOOT_HALF_WIDTH_M)  # [B]
+    airborne = (sensor.data.found > 0).sum(dim=1) == 0
+    on = airborne & sk.mask(sk.ref_air_window)
+    if on.any():
+        env.extras["log"]["Metrics/hop_foot_clear_cm"] = 100.0 * z[on].max()
+    r = torch.clamp(z / target_m, 0.0, cap) * on.float()
+    return torch.nan_to_num(r, nan=0.0)
+
+
+def sole_lowest_z(asset: Entity, site_ids, half_length: float, half_width: float) -> torch.Tensor:
+    """[B] world z of the lowest corner of the soles (rectangles half_length x half_width
+    centred at the foot sites, site x forward / y left), min over the feet."""
+    pos = asset.data.site_pos_w[:, site_ids, :]  # [B, F, 3]
+    q = asset.data.site_quat_w[:, site_ids, :]  # [B, F, 4] (w, x, y, z)
+    w, x, y, zq = q[..., 0], q[..., 1], q[..., 2], q[..., 3]
+    r20 = 2.0 * (x * zq - w * y)  # world z of the site x axis
+    r21 = 2.0 * (y * zq + w * x)  # world z of the site y axis
+    low = pos[..., 2] - torch.abs(r20) * half_length - torch.abs(r21) * half_width
+    return low.min(dim=1).values
