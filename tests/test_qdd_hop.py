@@ -236,18 +236,30 @@ def test_hop_env_steps_and_rewards_are_finite(hop_env):
     assert torch.allclose(microduck_mdp.skill_contact_schedule(env, "feet_ground_contact"), torch.ones(4))
 
 
-def test_hop_rsi_avoids_the_jump_window(hop_env):
+def test_hop_rsi_inside_and_outside_the_jump(hop_env):
     env = hop_env
     sk = env.command_manager.get_term("skill")
+    assert env.cfg.commands["skill"].rsi_jump_fraction == 0.5  # training cfg
+    robot = env.scene["robot"]
+    fast = sk.ref_fast_window.cpu().numpy()
+    jump = set(sk.rsi_jump_steps.tolist())
     sk.cfg.rsi_fraction = 1.0
     try:
-        for _ in range(3):
+        for frac, inside in ((0.0, False), (1.0, True)):
+            sk.cfg.rsi_jump_fraction = frac
             env.reset()
             k0 = sk.k0.cpu().numpy()
             assert np.all(k0 > 0)
-            assert not np.any(sk.ref_fast_window.cpu().numpy()[k0])
+            if inside:
+                assert set(k0.tolist()) <= jump
+                env.sim.forward()
+                soles = robot.data.site_pos_w[:, [robot.find_sites(n)[0][0] for n in ("l_foot_site", "r_foot_site")], 2]
+                assert torch.all(soles > -0.005), soles  # not inside the floor
+            else:
+                assert not np.any(fast[k0])
     finally:
         sk.cfg.rsi_fraction = 0.0
+        sk.cfg.rsi_jump_fraction = 0.5
 
 
 # --- policy_io / cfg ----------------------------------------------------------------------

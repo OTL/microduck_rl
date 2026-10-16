@@ -339,6 +339,25 @@ class FloorKinematics:
 _FK: FloorKinematics | None = None
 
 
+def lowest_sole_offset(q: np.ndarray, quat: np.ndarray) -> float:
+    """Lowest sole corner below the torso origin [m] (negative) with the torso at
+    orientation quat (w, x, y, z) and joints q (for spawning airborne states)."""
+    fk = floor_kinematics()
+    mj, m, d = fk._mj, fk.m, fk.d
+    d.qpos[:] = 0.0
+    d.qpos[3:7] = quat
+    d.qpos[fk.qadr] = q
+    mj.mj_forward(m, d)
+    z = np.inf
+    for sid in fk.sites:
+        p = d.site_xpos[sid]
+        R = d.site_xmat[sid].reshape(3, 3)
+        for sx in (-1, 1):
+            for sy in (-1, 1):
+                z = min(z, float((p + R @ np.array([sx * FOOT_HALF_LENGTH_M, sy * FOOT_HALF_WIDTH_M, 0.0]))[2]))
+    return z
+
+
 def floor_kinematics() -> FloorKinematics:
     global _FK
     if _FK is None:
@@ -454,6 +473,12 @@ def build_reference_arrays(spec: dict, kf_t: np.ndarray, kf_q: np.ndarray, dt: f
     near = np.zeros(n + 1, dtype=bool)
     com_ref = ref["com_z"].copy()
     rise = (spec.get("flight") or {}).get("com_rise_m", 0.0)
+    # reference-state initialisation inside a jump (push-off + flight): root height /
+    # orientation / vertical speed. On the ground = flat-sole kinematics.
+    rsi_h = ref["height"].copy()
+    rsi_quat = ref["quat"].copy()
+    rsi_vz = np.gradient(ref["height"], dt)
+    rsi_jump = np.zeros(n + 1, dtype=bool)
     for t0, t1 in flights:
         k0 = int(np.clip(math.ceil(t0 / dt - 1e-6) - 1, 0, n))  # last step on the ground
         m_air = (t >= t0 - eps) & (t < t1 - eps)
@@ -468,6 +493,15 @@ def build_reference_arrays(spec: dict, kf_t: np.ndarray, kf_q: np.ndarray, dt: f
         com_ref[m_air] = ref["com_z"][k0] + v0 * tau - 0.5 * G * tau * tau
         for key in ("pitch", "roll", "height"):
             ref[key][m_land] = ref[key][k0]
+        push = (t >= t0 - FAST_PRE_S - eps) & (t < t0 - eps)
+        rsi_jump |= push | m_air
+        for k in np.flatnonzero(m_air):
+            # torso as at take-off, raised by the ballistic CoM rise; soles >= 2 mm above the floor
+            rsi_quat[k] = ref["quat"][k0]
+            h = ref["height"][k0] + (com_ref[k] - ref["com_z"][k0])
+            low = lowest_sole_offset(q[k], rsi_quat[k])
+            rsi_h[k] = max(h, 0.002 - low)
+            rsi_vz[k] = takeoff_speed(rise) - G * (t[k] - t[k0])
     ref.update(
         in_air=in_air,
         air_window=air,
@@ -476,6 +510,11 @@ def build_reference_arrays(spec: dict, kf_t: np.ndarray, kf_q: np.ndarray, dt: f
         near_switch=near,
         com_z_ref=com_ref,
         rsi_ok=~fast,
+        rsi_jump=rsi_jump,
+        rsi_height=rsi_h,
+        rsi_quat=rsi_quat,
+        rsi_vz=rsi_vz,
+        com_vz_ref=np.gradient(com_ref, dt),
         flights=flights,
     )
     return ref

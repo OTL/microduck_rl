@@ -8113,9 +8113,14 @@ class SkillClockCommand(CommandTerm):
         self.ref_height_window = b("height_window")
         self.ref_near_switch = b("near_switch")
         self.ref_com_z = f(ref["com_z_ref"])
+        self.ref_com_vz = f(ref["com_vz_ref"])
         rsi_ok = np.asarray(ref["rsi_ok"]).copy()
         rsi_ok[0] = rsi_ok[-1] = False
         self.rsi_steps = torch.tensor(np.flatnonzero(rsi_ok), dtype=torch.long, device=dev)
+        self.rsi_jump_steps = torch.tensor(np.flatnonzero(ref["rsi_jump"]), dtype=torch.long, device=dev)
+        self.rsi_height = f(ref["rsi_height"])
+        self.rsi_quat = f(ref["rsi_quat"])
+        self.rsi_vz = f(ref["rsi_vz"])
         self.k0 = torch.zeros(self.num_envs, dtype=torch.long, device=dev)
         self.asset: Entity = env.scene[cfg.asset_name]
         from mjlab_microduck.robot.qdd_biped_constants import QDD_JOINT_NAMES
@@ -8176,7 +8181,12 @@ class SkillClockCommand(CommandTerm):
         if self.cfg.rsi_fraction > 0.0 and n_env > 0:
             use = torch.rand(n_env, device=self.device) < self.cfg.rsi_fraction
             pick = self.rsi_steps[torch.randint(0, len(self.rsi_steps), (n_env,), device=self.device)]
-            k0 = torch.where(use, pick, k0)  # outside the push-off .. landing window
+            if len(self.rsi_jump_steps) and self.cfg.rsi_jump_fraction > 0.0:
+                # part of the RSI starts inside the jump (push-off / flight) so landing gets data
+                pj = self.rsi_jump_steps[torch.randint(0, len(self.rsi_jump_steps), (n_env,), device=self.device)]
+                jump = torch.rand(n_env, device=self.device) < self.cfg.rsi_jump_fraction
+                pick = torch.where(jump, pj, pick)
+            k0 = torch.where(use, pick, k0)
         self.k0[env_ids] = k0
         rsi = env_ids[k0 > 0]
         if len(rsi) == 0:
@@ -8192,8 +8202,9 @@ class SkillClockCommand(CommandTerm):
         asset.write_joint_state_to_sim(q, dq, env_ids=rsi)
         root = torch.zeros(len(rsi), 13, device=self.device)
         root[:, 0:2] = asset.data.root_link_pos_w[rsi, 0:2]
-        root[:, 2] = self.ref_height[k] + self.cfg.rsi_height_offset
-        root[:, 3:7] = quat_mul(yaw_quat(asset.data.root_link_quat_w[rsi]), self.ref_quat[k])
+        root[:, 2] = self.rsi_height[k] + self.cfg.rsi_height_offset
+        root[:, 3:7] = quat_mul(yaw_quat(asset.data.root_link_quat_w[rsi]), self.rsi_quat[k])
+        root[:, 9] = self.rsi_vz[k]
         asset.write_root_state_to_sim(root, env_ids=rsi)
 
 
@@ -8204,6 +8215,7 @@ class SkillClockCommandCfg(CommandTermCfg):
     spec_source: str = "<cfg>"
     asset_name: str = "robot"
     rsi_fraction: float = 0.3
+    rsi_jump_fraction: float = 0.0  # of the RSI starts: inside a jump (push-off / flight)
     rsi_height_offset: float = 0.003  # m, spawn the soles just above the floor
 
     def build(self, env: ManagerBasedRlEnv) -> SkillClockCommand:
@@ -8355,9 +8367,12 @@ def robot_com(env: ManagerBasedRlEnv, asset: Entity) -> tuple[torch.Tensor, torc
     return pos, vel
 
 
-def skill_contact_schedule(env: ManagerBasedRlEnv, sensor_name: str, command_name: str = "skill") -> torch.Tensor:
-    """REWARD in [0, 1] (replaces skill_feet_contact for a jump): fraction of the soles
-    doing what the schedule says (down on the floor / in the air); within
+def skill_contact_schedule(
+    env: ManagerBasedRlEnv, sensor_name: str, command_name: str = "skill", air_gain: float = 1.0
+) -> torch.Tensor:
+    """REWARD in [0, air_gain] (replaces skill_feet_contact for a jump): fraction of the
+    soles doing what the schedule says (down on the floor / in the air; airborne steps
+    pay air_gain: the flight is a few steps of a 200-step episode); within
     CONTACT_TOL_S of a scheduled take-off / touchdown any SYMMETRIC state pays 1 and a
     single foot pays 0 (take off and land with both feet together)."""
     from mjlab.sensor import ContactSensor
@@ -8367,7 +8382,7 @@ def skill_contact_schedule(env: ManagerBasedRlEnv, sensor_name: str, command_nam
     assert sensor.data.found is not None
     n_down = (sensor.data.found > 0).float().sum(dim=1)
     air = sk.mask(sk.ref_in_air)
-    r = torch.where(air, 1.0 - 0.5 * n_down, 0.5 * n_down)
+    r = torch.where(air, air_gain * (1.0 - 0.5 * n_down), 0.5 * n_down)
     r = torch.where(sk.mask(sk.ref_near_switch), (n_down != 1.0).float(), r)
     if air.any():
         env.extras["log"]["Metrics/hop_airborne_frac"] = (n_down[air] == 0).float().mean()
@@ -8377,6 +8392,7 @@ def skill_contact_schedule(env: ManagerBasedRlEnv, sensor_name: str, command_nam
 def skill_flight_height(
     env: ManagerBasedRlEnv,
     std: float,
+    vel_std: float = 0.3,
     command_name: str = "skill",
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
@@ -8385,13 +8401,16 @@ def skill_flight_height(
     CoM rise of the spec). Tracks a trajectory, it does not pay for jumping higher."""
     sk = _qdd_skill(env, command_name)
     asset: Entity = env.scene[asset_cfg.name]
-    com, _ = robot_com(env, asset)
+    com, vel = robot_com(env, asset)
     k = sk.step_index
     err = torch.square(com[:, 2] - sk.ref_com_z[k])
+    err_v = torch.square(vel[:, 2] - sk.ref_com_vz[k])
     air = sk.mask(sk.ref_in_air)
     if air.any():
         env.extras["log"]["Metrics/hop_com_err_cm"] = 100.0 * torch.sqrt(err[air]).mean()
-    return torch.nan_to_num(torch.exp(-err / std**2), nan=0.0) * sk.mask(sk.ref_height_window).float()
+    # height + vertical speed (the speed term gives the push-off a gradient before any flight)
+    r = 0.5 * torch.exp(-err / std**2) + 0.5 * torch.exp(-err_v / vel_std**2)
+    return torch.nan_to_num(r, nan=0.0) * sk.mask(sk.ref_height_window).float()
 
 
 def skill_takeoff_speed_cost(

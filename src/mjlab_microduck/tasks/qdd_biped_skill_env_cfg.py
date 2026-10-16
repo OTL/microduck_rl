@@ -91,6 +91,9 @@ JUMP_PHYSICS_DT = 0.0025  # s (explicit PD of the ankle is not stable at 5 ms)
 JUMP_ACTUATOR_MAX_LAG_S = 0.01  # command latency 0-10 ms (as walking)
 JUMP_PLAY_LAG_S = 0.005
 FLIGHT_HEIGHT_STD = 0.015  # m, CoM height tracking in the push-off + flight window
+FLIGHT_VZ_STD = 0.3  # m/s, CoM vertical speed tracking in the same window
+CONTACT_AIR_GAIN = 3.0  # airborne steps of the contact schedule pay this much
+RSI_JUMP_FRACTION = 0.5  # of the RSI starts (30 %): inside the push-off / flight
 FAST_TRACKING_STD_SCALE = 2.0  # joint tracking std x this from push-off to landing
 FAST_ACTION_RATE_SCALE = 0.1  # action-rate cost x this from push-off to landing
 LANDING_SOFT_FRACTION = 0.6  # landing cost starts at 0.6 x the spec limit (quadratic)
@@ -201,6 +204,8 @@ def make_qdd_biped_skill_env_cfg(spec_path=None, play: bool = False) -> ManagerB
 
     if jump:
         _add_jump_rewards(cfg, spec)
+        if not play:
+            cfg.commands["skill"].rsi_jump_fraction = RSI_JUMP_FRACTION
 
     # --- Terminations ------------------------------------------------------------------
     cfg.terminations["fell_over"].params["limit_angle"] = math.radians(FALL_TILT_DEG)
@@ -249,12 +254,12 @@ def _add_jump_rewards(cfg: ManagerBasedRlEnvCfg, spec: dict) -> None:
     r["feet_contact"] = RewardTermCfg(
         func=microduck_mdp.skill_contact_schedule,
         weight=w["feet_contact"],
-        params={"sensor_name": "feet_ground_contact", "command_name": "skill"},
+        params={"sensor_name": "feet_ground_contact", "command_name": "skill", "air_gain": CONTACT_AIR_GAIN},
     )
     r["flight_height"] = RewardTermCfg(
         func=microduck_mdp.skill_flight_height,
         weight=w["flight_height"],
-        params={"std": FLIGHT_HEIGHT_STD, "command_name": "skill"},
+        params={"std": FLIGHT_HEIGHT_STD, "vel_std": FLIGHT_VZ_STD, "command_name": "skill"},
     )
     r["takeoff_speed"] = RewardTermCfg(
         func=microduck_mdp.skill_takeoff_speed_cost,
