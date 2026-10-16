@@ -1,6 +1,7 @@
 """Evaluate a hop (jumping skill) ONNX policy in mjlab: nominal and domain-randomised.
 
     python scripts/eval_qdd_hop.py <policy.onnx> [--envs 32] [--json out.json]
+    python scripts/eval_qdd_hop.py zero ...      # zero action: a feed-forward skill's table alone
 
 One skill execution per env from the standing pose (no RSI). Per env:
   - CoM rise: highest whole-robot CoM after take-off minus the CoM at take-off, and
@@ -45,7 +46,7 @@ def run(onnx_path: str, play: bool, n_envs: int, seed: int = 0) -> dict:
     cfg.scene.num_envs = n_envs
     cfg.commands["skill"].rsi_fraction = 0.0
     env = ManagerBasedRlEnv(cfg=cfg, device="cpu")
-    sess = ort.InferenceSession(onnx_path)
+    sess = None if onnx_path == "zero" else ort.InferenceSession(onnx_path)
     robot = env.scene["robot"]
     sensor = env.scene.sensors["feet_ground_contact"]
     sk = env.command_manager.get_term("skill")
@@ -85,9 +86,12 @@ def run(onnx_path: str, play: bool, n_envs: int, seed: int = 0) -> dict:
     rec = {k: [] for k in ("com_z", "com_vz", "air", "fz", "sole_z", "pitch")}
     alive = torch.ones(B, dtype=torch.bool)
     final = None
-    for k in range(n):
+    for k in range(n - 1):  # the last step times out and respawns (not part of the hop)
         x = obs["actor"].numpy().astype(np.float32)
-        act = np.concatenate([sess.run(None, {"obs": x[i : i + 1]})[0] for i in range(B)])
+        if sess is None:
+            act = np.zeros((B, env.action_manager.total_action_dim), dtype=np.float32)
+        else:
+            act = np.concatenate([sess.run(None, {"obs": x[i : i + 1]})[0] for i in range(B)])
         obs, _, term, trunc, _ = env.step(torch.from_numpy(act))
         com, vel = microduck_mdp.robot_com(env, robot)
         if com_stand is None:
@@ -210,9 +214,10 @@ def main():
     ap.add_argument("onnx")
     ap.add_argument("--envs", type=int, default=32)
     ap.add_argument("--json")
+    ap.add_argument("--nominal-only", action="store_true")
     a = ap.parse_args()
     out = {}
-    for play, n in ((True, 2), (False, a.envs)):
+    for play, n in ((True, 2), (False, a.envs))[: 1 if a.nominal_only else 2]:
         res = run(a.onnx, play, n)
         out["nominal" if play else "randomised"] = dict(summary=summarise(res), envs=res["envs"])
         print(json.dumps(out["nominal" if play else "randomised"]["summary"], indent=1))

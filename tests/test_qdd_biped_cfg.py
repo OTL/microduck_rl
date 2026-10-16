@@ -46,7 +46,7 @@ def test_model_names_resolve():
     for s in ("imu_ang_vel", "imu_lin_vel", "root_angmom"):
         m.sensor(s)
     assert m.nu == 0  # actuators come from the mjlab cfg, not the XML
-    assert abs(m.body_subtreemass[1] - 6.623) < 0.01  # robot repo model: + 10 mm TPU landing pads, A7075 brackets
+    assert abs(m.body_subtreemass[1] - 6.607) < 0.01  # robot repo model: + 10 mm TPU landing pads (foot 139 g), A7075 brackets
 
 
 def test_stand_height_puts_soles_on_floor():

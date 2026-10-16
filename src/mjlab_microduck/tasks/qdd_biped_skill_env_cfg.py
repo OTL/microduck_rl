@@ -41,6 +41,15 @@ orientation / height references and the flat-feet cost are off in the flight /
 landing window, joint tracking is looser and the action-rate cost smaller from the
 push-off to the landing; RSI only outside that window. Extra DR: sole-floor contact
 stiffness / damping (floor, sole pad), motor bus voltage and strength.
+
+Feed-forward skills (spec "reference_table", e.g. the hop since 2026-10-17): the
+action becomes a residual around the table (mdp.SkillReferenceJointPositionAction:
+position target q_ref + scale * residual_scale(t) * a, velocity target dq_ref,
+torque feed-forward tau_ref, played back at the physics rate); the actor starts from
+scratch with a near-zero output layer (zero residual = the table alone, which hops);
+RSI concentrates on the crouch just before the push (episodes centred on the hop),
+no RSI inside the jump; smaller fall penalty; a small residual-magnitude cost; the
+residual gain ramps from REF_RESIDUAL_GAIN_START to 1 over the first iterations.
 """
 
 from __future__ import annotations
@@ -105,6 +114,16 @@ MOTOR_V_BUS_RANGE = (19.5, 24.0)  # V: low battery under load .. full pack
 MOTOR_STRENGTH_RANGE = (0.9, 1.1)  # torque constant / driver current calibration
 PUSH_RANGE = (-0.15, 0.15)  # m/s (walking: 0.3; a planted-feet skill should not need a step)
 SETTLE_EXTRA_S = 1.0  # episode_length_s = total + this (skill_done ends it at total)
+# --- Feed-forward (reference table) skills --------------------------------------------
+REF_RSI_FRACTION = 0.7  # of the resets: start inside the reference ...
+REF_RSI_FOCUS_FRACTION = 0.7  # ... and of those, in the crouch just before the push
+REF_RSI_FOCUS_LEAD_S = 0.5  # focus window = [push start - this, push start - 0.02 s]
+REF_TERMINATION_WEIGHT = -50.0  # x dt (10 ms) = -0.5 per fall
+REF_RESIDUAL_WEIGHT = 0.05  # |a|^2 cost
+REF_RESIDUAL_GAIN_START = 0.5
+REF_RESIDUAL_RAMP_ITERS = 300
+REF_INIT_STD = 0.5
+REF_OUTPUT_INIT_GAIN = 0.01  # last actor layer x this at the start (residual ~ 0)
 
 # Warm start: initialise the actor (MLP + obs normaliser) from a walking ONNX with
 # the same 41-D obs / 10-D action layout. $QDD_SKILL_INIT_ONNX = path, or "none".
@@ -129,6 +148,7 @@ def make_qdd_biped_skill_env_cfg(spec_path=None, play: bool = False) -> ManagerB
     w = spec["reward_weights"]
     total = qdd_skill.total_s(spec)
     jump = spec.get("flight") is not None
+    ff = spec.get("_table") is not None
 
     cfg = make_qdd_biped_velocity_env_cfg(play=play)
     cfg.episode_length_s = total + SETTLE_EXTRA_S
@@ -206,6 +226,8 @@ def make_qdd_biped_skill_env_cfg(spec_path=None, play: bool = False) -> ManagerB
         _add_jump_rewards(cfg, spec)
         if not play:
             cfg.commands["skill"].rsi_jump_fraction = RSI_JUMP_FRACTION
+    if ff:
+        _make_reference_action(cfg, spec, play)
 
     # --- Terminations ------------------------------------------------------------------
     cfg.terminations["fell_over"].params["limit_angle"] = math.radians(FALL_TILT_DEG)
@@ -219,7 +241,55 @@ def make_qdd_biped_skill_env_cfg(spec_path=None, play: bool = False) -> ManagerB
     if jump and not play:
         _add_jump_events(cfg)
     cfg.curriculum = {}
+    if ff and not play:
+        from mjlab.managers import CurriculumTermCfg
+
+        from mjlab_microduck.tasks.qdd_biped_velocity_env_cfg import NUM_STEPS_PER_ENV
+
+        cfg.curriculum["residual_gain"] = CurriculumTermCfg(
+            func=microduck_mdp.skill_residual_gain_curriculum,
+            params={
+                "start": REF_RESIDUAL_GAIN_START,
+                "end": 1.0,
+                "ramp_steps": REF_RESIDUAL_RAMP_ITERS * NUM_STEPS_PER_ENV,
+            },
+        )
     return cfg
+
+
+def _make_reference_action(cfg: ManagerBasedRlEnvCfg, spec: dict, play: bool) -> None:
+    """Residual action around the feed-forward table, RSI centred on the hop, reward
+    rebalance (see the module docstring)."""
+    old = cfg.actions["joint_pos"]
+    cfg.actions["joint_pos"] = microduck_mdp.SkillReferenceJointPositionActionCfg(
+        entity_name=old.entity_name,
+        actuator_names=old.actuator_names,
+        scale=old.scale,
+        preserve_order=old.preserve_order,
+        command_name="skill",
+    )
+    sk = cfg.commands["skill"]
+    sk.rsi_jump_fraction = 0.0  # mid-push / mid-flight states do not match the feed-forward
+    if not play:
+        push0 = _push_start(spec)
+        sk.rsi_fraction = REF_RSI_FRACTION
+        sk.rsi_focus_window = (push0 - REF_RSI_FOCUS_LEAD_S, push0 - 0.02)
+        sk.rsi_focus_fraction = REF_RSI_FOCUS_FRACTION
+    r = cfg.rewards
+    r["termination"] = RewardTermCfg(func=mj_rewards.is_terminated, weight=REF_TERMINATION_WEIGHT)
+    r["residual_l2"] = RewardTermCfg(func=microduck_mdp.skill_residual_l2, weight=-REF_RESIDUAL_WEIGHT)
+
+
+def _push_start(spec: dict) -> float:
+    """Start of the push-off in the table: the first row with residual_scale < 1 (the
+    table lowers it from just before the push), else take-off - FAST_PRE_S."""
+    import numpy as np
+
+    tb = spec["_table"]
+    rs = np.asarray(tb["residual_scale"])
+    low = np.flatnonzero(rs < 0.999)
+    t_to = qdd_skill.flight_intervals(spec["contact"])[0][0]
+    return float(low[0] * tb["dt"]) if len(low) else t_to - qdd_skill.FAST_PRE_S
 
 
 def _make_jump_physics(cfg: ManagerBasedRlEnvCfg, spec: dict, play: bool) -> None:
@@ -358,13 +428,21 @@ QddSkillRlCfg = _skill_rl_cfg()
 
 
 def _jump_rl_cfg():
+    """Hop with the feed-forward table: 100 Hz policy, actor from scratch (zero
+    residual = the table), gamma 0.995 (same horizon in seconds as 0.99 at 50 Hz)."""
     from dataclasses import replace as dc_replace
 
+    actor = dc_replace(
+        QddSkillRlCfg.actor,
+        distribution_cfg={"class_name": "GaussianDistribution", "init_std": REF_INIT_STD, "std_type": "scalar"},
+    )
     return dc_replace(
         QddSkillRlCfg,
+        actor=actor,
+        algorithm=dc_replace(QddSkillRlCfg.algorithm, gamma=0.995),
         experiment_name="qdd_biped_skill_hop",
         run_name="qdd_biped_skill_hop",
-        max_iterations=800,
+        max_iterations=2000,
     )
 
 
@@ -435,6 +513,8 @@ def build_skill_policy_io(spec: dict) -> dict:
             f"{qdd_skill.CONTACT_TOL_S} s early or late. The controller allows flight only inside "
             "a scheduled flight (+ tolerance) and faults after max_flight_s airborne."
         )
+    if spec.get("_table") is not None:
+        _add_reference_io(io, spec)
     io["gait_clock"] = {
         "period_s": 2.0 * total,
         "swing_fraction": 0.0,
@@ -453,6 +533,35 @@ def build_skill_policy_io(spec: dict) -> dict:
         "standing": "skill policy: the command is ignored (always [0, 0, 0])",
     }
     return io
+
+
+def _add_reference_io(io: dict, spec: dict) -> None:
+    """policy_io for a feed-forward skill: the table (rows every dt, joint_order) and
+    the action rule the controller must apply."""
+    from mjlab_microduck.robot.qdd_biped_constants import QDD_JOINT_NAMES
+
+    tb = spec["_table"]
+    r = lambda a, d: [[round(float(x), d) for x in row] for row in a]  # noqa: E731
+    io["action"]["target"] = (
+        "skill with a feed-forward table (skill.reference): q_target = reference.q(t) + scale * "
+        "reference.residual_scale(t) * action, velocity target reference.dq(t), torque feed-forward "
+        "reference.tau_ff(t) (driver MIT: tau = kp (q_target - q) + kd (dq_target - dq) + tau_ff)"
+    )
+    io["skill"]["reference"] = {
+        "format": qdd_skill.TABLE_FORMAT,
+        "source": tb["name"],
+        "sha256": tb["sha256"],
+        "dt": tb["dt"],
+        "joint_order": list(QDD_JOINT_NAMES),
+        "time": "t = seconds since the skill started (t = k * policy_dt_s at the k-th policy step, "
+        "advancing at the control rate between policy steps); rows at t = i * dt, linear interpolation, "
+        "the last row after the end",
+        "q": r(tb["q"], 4),
+        "dq": r(tb["dq"], 3),
+        "tau_ff": r(tb["tau_ff"], 3),
+        "residual_scale": [round(float(x), 3) for x in tb["residual_scale"]],
+        **{k: v for k, v in tb["meta"].items()},
+    }
 
 
 def skill_policy_io_json(spec: dict) -> str:

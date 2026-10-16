@@ -23,6 +23,7 @@ calibration, +-10 %) that scales the envelope (not the driver's clamp t_lim).
 
 from __future__ import annotations
 
+import dataclasses
 import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -102,6 +103,19 @@ class QddMotorActuator(IdealPdActuator[QddMotorActuatorCfg]):
         self.v_bus = torch.full((n, 1), float(self.cfg.v_bus), device=device)
         self.strength = torch.ones((n, 1), device=device)
         self._vel = torch.zeros((n, len(self._target_names)), device=device)
+
+    def apply_delay(self, cmd: ActuatorCmd) -> ActuatorCmd:
+        """Delay the whole MIT command (position target, velocity target, torque
+        feed-forward) by the same lag: they travel in one CAN frame on the robot.
+        (mjlab's default delays only the position target.)"""
+        if self._delay_buffer is None:
+            return cmd
+        n = cmd.position_target.shape[-1]
+        self._delay_buffer.append(torch.cat((cmd.position_target, cmd.velocity_target, cmd.effort_target), dim=-1))
+        out = self._delay_buffer.compute()
+        return dataclasses.replace(
+            cmd, position_target=out[..., :n], velocity_target=out[..., n : 2 * n], effort_target=out[..., 2 * n :]
+        )
 
     def compute(self, cmd: ActuatorCmd) -> torch.Tensor:
         assert self._vel is not None

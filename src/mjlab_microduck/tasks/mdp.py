@@ -76,6 +76,7 @@ print("[mdp] Patches 1-2 active: NaN-safe reward/advantage")
 # ---------------------------------------------------------------------------
 from mjlab.rl import exporter_utils as _exporter_utils  # noqa: E402
 from mjlab.envs.mdp.actions import JointPositionAction as _JointAction  # noqa: E402
+from mjlab.envs.mdp.actions import JointPositionActionCfg as _JointPositionActionCfgBase  # noqa: E402
 
 def _get_base_metadata_no_passive(env, run_path):
     robot = env.scene["robot"]
@@ -8118,6 +8119,11 @@ class SkillClockCommand(CommandTerm):
         rsi_ok[0] = rsi_ok[-1] = False
         self.rsi_steps = torch.tensor(np.flatnonzero(rsi_ok), dtype=torch.long, device=dev)
         self.rsi_jump_steps = torch.tensor(np.flatnonzero(ref["rsi_jump"]), dtype=torch.long, device=dev)
+        focus = np.zeros_like(rsi_ok)
+        if cfg.rsi_focus_window is not None:
+            t_ref = np.asarray(ref["t"])
+            focus = rsi_ok & (t_ref >= cfg.rsi_focus_window[0]) & (t_ref <= cfg.rsi_focus_window[1])
+        self.rsi_focus_steps = torch.tensor(np.flatnonzero(focus), dtype=torch.long, device=dev)
         self.rsi_height = f(ref["rsi_height"])
         self.rsi_quat = f(ref["rsi_quat"])
         self.rsi_vz = f(ref["rsi_vz"])
@@ -8186,6 +8192,11 @@ class SkillClockCommand(CommandTerm):
                 pj = self.rsi_jump_steps[torch.randint(0, len(self.rsi_jump_steps), (n_env,), device=self.device)]
                 jump = torch.rand(n_env, device=self.device) < self.cfg.rsi_jump_fraction
                 pick = torch.where(jump, pj, pick)
+            if len(self.rsi_focus_steps) and self.cfg.rsi_focus_fraction > 0.0:
+                # episodes centred on the jump: start in the crouch just before the push
+                pf = self.rsi_focus_steps[torch.randint(0, len(self.rsi_focus_steps), (n_env,), device=self.device)]
+                foc = torch.rand(n_env, device=self.device) < self.cfg.rsi_focus_fraction
+                pick = torch.where(foc, pf, pick)
             k0 = torch.where(use, pick, k0)
         self.k0[env_ids] = k0
         rsi = env_ids[k0 > 0]
@@ -8217,6 +8228,8 @@ class SkillClockCommandCfg(CommandTermCfg):
     rsi_fraction: float = 0.3
     rsi_jump_fraction: float = 0.0  # of the RSI starts: inside a jump (push-off / flight)
     rsi_height_offset: float = 0.003  # m, spawn the soles just above the floor
+    rsi_focus_window: tuple[float, float] | None = None  # s: part of the RSI starts in this window ...
+    rsi_focus_fraction: float = 0.0  # ... (fraction of the RSI starts)
 
     def build(self, env: ManagerBasedRlEnv) -> SkillClockCommand:
         return SkillClockCommand(self, env)
@@ -8574,3 +8587,99 @@ def randomize_qdd_motor_envelope(
     for act in asset.actuators:
         if isinstance(act, QddMotorActuator):
             act.set_envelope(env_ids, v_bus=v, strength=s)
+
+
+# =============================================================================
+# QDD biped skills with a feed-forward reference table (skill spec "reference_table")
+# =============================================================================
+# The low level plays back the table (joint position target, velocity target, torque
+# feed-forward) at the physics rate and the policy action is a residual around it:
+#   q* = q_ref(t) + scale * residual_scale(t) * residual_gain * a,  dq* = dq_ref(t),
+#   tau_ff = tau_ref(t),  t = skill time of the physics substep (linear interpolation
+#   of the table rows). The Rust controller does the same at its control rate
+#   (policy_io skill.reference).
+
+
+class SkillReferenceJointPositionAction(_JointAction):
+    """Joint position action as a residual around the skill's feed-forward table."""
+
+    cfg: "SkillReferenceJointPositionActionCfg"
+
+    def __init__(self, cfg: "SkillReferenceJointPositionActionCfg", env: ManagerBasedRlEnv):
+        super().__init__(cfg=cfg, env=env)
+        from mjlab_microduck.robot.qdd_biped_constants import QDD_JOINT_NAMES
+        from mjlab_microduck.tasks import qdd_skill
+
+        sk = _qdd_skill(env, cfg.command_name)
+        table = sk.spec.get("_table")
+        if table is None:
+            raise ValueError("SkillReferenceJointPositionAction needs a skill spec with a reference_table")
+        self._env_ref = env
+        self._dec = int(env.cfg.decimation)
+        pdt = env.physics_dt
+        n_sub = (sk.n + 1) * self._dec
+        t = np.arange(n_sub) * pdt
+        order = [QDD_JOINT_NAMES.index(nm) for nm in self._target_names]
+        f = lambda a: torch.tensor(np.asarray(a, dtype=np.float32), device=self.device)  # noqa: E731
+        self.ref_q = f(qdd_skill.sample_table(table, t, "q")[:, order])
+        self.ref_dq = f(qdd_skill.sample_table(table, t, "dq")[:, order])
+        self.ref_tau = f(qdd_skill.sample_table(table, t, "tau_ff")[:, order])
+        self.ref_res = f(qdd_skill.sample_table(table, t, "residual_scale"))
+        self._n_sub = n_sub
+        self._sub = 0
+        self.residual_gain = float(cfg.residual_gain)
+        self.zero_residual = bool(cfg.zero_residual)
+
+    def process_actions(self, actions: torch.Tensor):
+        self._raw_actions[:] = actions
+        self._sub = 0
+
+    def _index(self) -> torch.Tensor:
+        sk = _qdd_skill(self._env_ref, self.cfg.command_name)
+        k = sk.step_index * self._dec + self._sub
+        return torch.clamp(k, 0, self._n_sub - 1)
+
+    def apply_actions(self) -> None:
+        i = self._index()
+        res = self.ref_res[i].unsqueeze(1) * (self._scale * self.residual_gain)
+        a = torch.zeros_like(self._raw_actions) if self.zero_residual else self._raw_actions
+        target = self.ref_q[i] + res * a
+        self._processed_actions = target
+        encoder_bias = self._entity.data.encoder_bias[:, self._target_ids]
+        self._entity.set_joint_position_target(target - encoder_bias, joint_ids=self._target_ids)
+        self._entity.set_joint_velocity_target(self.ref_dq[i], joint_ids=self._target_ids)
+        self._entity.set_joint_effort_target(self.ref_tau[i], joint_ids=self._target_ids)
+        self._sub += 1
+
+
+@_dataclass(kw_only=True)
+class SkillReferenceJointPositionActionCfg(_JointPositionActionCfgBase):
+    command_name: str = "skill"
+    residual_gain: float = 1.0  # global multiplier on the residual (curriculum)
+    zero_residual: bool = False  # play the table alone (validation)
+
+    def build(self, env: ManagerBasedRlEnv) -> SkillReferenceJointPositionAction:
+        return SkillReferenceJointPositionAction(self, env)
+
+
+def skill_residual_l2(env: ManagerBasedRlEnv, action_name: str = "joint_pos") -> torch.Tensor:
+    """COST (>= 0): |a|^2 of the residual action (stay on the feed-forward unless it
+    pays off)."""
+    return torch.sum(torch.square(env.action_manager.action), dim=1)
+
+
+def skill_residual_gain_curriculum(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    start: float,
+    end: float,
+    ramp_steps: int,
+    action_name: str = "joint_pos",
+) -> torch.Tensor:
+    """Curriculum: residual gain from ``start`` to ``end`` over ``ramp_steps`` env
+    steps (common_step_counter): the policy starts on the feed-forward alone and
+    gets its full authority gradually."""
+    term = env.action_manager.get_term(action_name)
+    x = min(1.0, env.common_step_counter / max(1, ramp_steps))
+    term.residual_gain = start + (end - start) * x
+    return torch.tensor(term.residual_gain)

@@ -1,5 +1,9 @@
 """Mjlab-Skill-Hop-QddBiped: skill spec schema 2 (contact schedule, flight), the hop
-spec, the torque-speed envelope actuator, the jump env and its policy_io (CPU)."""
+spec, the torque-speed envelope actuator, the jump env and its policy_io (CPU).
+
+Two hop specs: tests/fixtures/hop_keyframes.json (the first, keyframe-only hop, 50 Hz:
+gate / interpolation tests) and skills/hop.json (the trained one: 100 Hz with the
+feed-forward table skills/hop_ref.json, residual action)."""
 
 import copy
 import json
@@ -20,23 +24,92 @@ from mjlab_microduck.tasks.qdd_biped_skill_env_cfg import (
     skill_onnx_metadata,
 )
 from mjlab_microduck.robot.qdd_biped_constants import QDD_JOINT_NAMES
+from pathlib import Path
+
+KEYFRAME_HOP = Path(__file__).parent / "fixtures" / "hop_keyframes.json"
 
 
 def _hop_raw() -> dict:
-    return json.loads((qdd_skill.SKILLS_DIR / "hop.json").read_text(encoding="utf-8"))
+    """The keyframe-only hop (no table)."""
+    return json.loads(KEYFRAME_HOP.read_text(encoding="utf-8"))
 
 
 # --- spec ---------------------------------------------------------------------------
 
 
 def test_hop_spec_is_valid():
-    spec = qdd_skill.load_spec("hop")
+    spec = qdd_skill.validate_spec(_hop_raw())
     assert spec["schema_version"] == 2 and spec["interpolation"] == "pchip"
     assert spec["policy_rate_hz"] == 50 and spec["policy_dt_s"] == pytest.approx(0.02)
     assert qdd_skill.flight_intervals(spec["contact"]) == [(1.39, 1.55)]
     fl = spec["flight"]
     assert fl["com_rise_m"] == 0.03 and fl["max_landing_load_mg"] == 4.0 and fl["toe_first"] is True
-    assert qdd_skill.main(["hop"]) == 0
+    assert "_table" not in spec
+    assert qdd_skill.main(["hop"]) == 0 and qdd_skill.main([str(KEYFRAME_HOP)]) == 0
+
+
+def test_feedforward_hop_spec_and_table():
+    spec = qdd_skill.load_spec("hop")
+    assert spec["policy_rate_hz"] == 100 and spec["reference_table"] == "hop_ref.json"
+    tb = spec["_table"]
+    assert tb["dt"] == pytest.approx(0.005) and tb["q"].shape[1] == 10
+    (t0, t1), = qdd_skill.flight_intervals(spec["contact"])
+    assert abs(tb["meta"]["t_takeoff"] - t0) < 0.01 and abs(tb["meta"]["t_touchdown"] - t1) < 0.01
+    assert 0.25 <= tb["residual_scale"].min() < 1.0 and tb["residual_scale"].max() == 1.0
+    # the dense joint reference is the table's q (not the keyframe interpolation)
+    ref = qdd_skill.build_reference(spec)
+    k = int(round(1.25 / 0.01))
+    assert np.allclose(ref["q"][k], qdd_skill.sample_table(tb, np.array([1.25]))[0])
+    # push-off up to ~15-18 rad/s, crouch calm
+    dq = np.abs(np.asarray(tb["dq"]))
+    assert 12.0 < dq.max() < qdd_skill.FAST_JOINT_SPEED_RAD_S
+
+
+def _table_raw() -> dict:
+    return json.loads((qdd_skill.SKILLS_DIR / "hop_ref.json").read_text(encoding="utf-8"))
+
+
+def _bad_table(fn):
+    raw = _table_raw()
+    fn(raw)
+    return raw
+
+
+BAD_TABLES = {
+    "format": (_bad_table(lambda r: r.update(format="x")), "format must be"),
+    "joint_order": (_bad_table(lambda r: r["joint_order"].reverse()), "joint_order must be"),
+    "dt": (_bad_table(lambda r: r.update(dt=0.05)), "reference_table: dt"),
+    "ragged": (_bad_table(lambda r: r["dq"].pop()), "different lengths"),
+    "nan": (_bad_table(lambda r: r["q"][5].__setitem__(2, float("nan"))), "must be finite"),
+    "end_tau": (_bad_table(lambda r: r["tau_ff"][-1].__setitem__(3, 1.0)), "last row must be the standing pose"),
+    "start_pose": (_bad_table(lambda r: r["q"][0].__setitem__(3, 1.2)), "first row must be the standing pose"),
+    "tau_big": (_bad_table(lambda r: r["tau_ff"][200].__setitem__(3, 9.5)), "exceeds 0.8 x the motor peak"),
+    "residual": (_bad_table(lambda r: r["residual_scale"].__setitem__(10, 0.0)), "residual_scale must be in"),
+    "takeoff": (_bad_table(lambda r: r.update(t_takeoff=r["t_takeoff"] + 0.1)), "reference_table.t_takeoff"),
+    "short": (_bad_table(lambda r: [r[k].__delitem__(slice(300, None)) for k in ("q", "dq", "tau_ff", "residual_scale")]),
+              "less than duration_s"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(BAD_TABLES))
+def test_bad_reference_tables_are_rejected(case, monkeypatch):
+    raw, needle = BAD_TABLES[case]
+    monkeypatch.setattr(qdd_skill, "load_table_text", lambda name: json.dumps(raw))
+    spec = json.loads((qdd_skill.SKILLS_DIR / "hop.json").read_text(encoding="utf-8"))
+    with pytest.raises(qdd_skill.SkillSpecError) as e:
+        qdd_skill.validate_spec(spec)
+    assert any(needle in msg for msg in e.value.errors), (case, e.value.errors)
+
+
+def test_reference_table_name_and_version():
+    spec = json.loads((qdd_skill.SKILLS_DIR / "hop.json").read_text(encoding="utf-8"))
+    for name in ("../hop_ref.json", "hop_ref.txt", "missing.json"):
+        with pytest.raises(qdd_skill.SkillSpecError):
+            qdd_skill.validate_spec({**spec, "reference_table": name})
+    v1 = json.loads((qdd_skill.SKILLS_DIR / "bow.json").read_text(encoding="utf-8"))
+    with pytest.raises(qdd_skill.SkillSpecError) as e:
+        qdd_skill.validate_spec({**v1, "reference_table": "hop_ref.json"})
+    assert any("needs schema_version 2" in m for m in e.value.errors)
 
 
 def test_v1_spec_normalised_without_flight():
@@ -136,7 +209,7 @@ def test_pchip_is_monotone_and_continues_through_the_push():
 
 
 def test_hop_reference_windows_and_ballistic_com():
-    spec = qdd_skill.load_spec("hop")
+    spec = qdd_skill.validate_spec(_hop_raw())
     ref = qdd_skill.build_reference(spec)
     t = ref["t"]
     t0, t1 = 1.39, 1.55
@@ -193,8 +266,8 @@ def test_hop_env_physics_actuators_and_terms(hop_env):
     from mjlab_microduck.actuator.qdd_motor import QddMotorActuator
 
     env = hop_env
-    assert env.cfg.sim.mujoco.timestep == JUMP_PHYSICS_DT and env.cfg.decimation == 8
-    assert env.step_dt == pytest.approx(0.02)
+    assert env.cfg.sim.mujoco.timestep == JUMP_PHYSICS_DT and env.cfg.decimation == 4
+    assert env.step_dt == pytest.approx(0.01)
     acts = env.scene["robot"].actuators
     assert len(acts) == 3 and all(isinstance(a, QddMotorActuator) for a in acts)
     terms = set(env.reward_manager.active_terms)
@@ -205,7 +278,8 @@ def test_hop_env_physics_actuators_and_terms(hop_env):
     for rew in ("flight_height", "feet_contact", "toe_first", "joint_tracking"):
         assert w[rew] > 0, rew
     fh = env.scene.sensors["feet_ground_contact"].data.force_history
-    assert fh is not None and fh.shape[2] == 8
+    assert fh is not None and fh.shape[2] == 4
+    assert w["residual_l2"] < 0 and w["termination"] == pytest.approx(-50.0)
 
 
 def test_envelope_clips_motoring_torque(hop_env):
@@ -236,30 +310,52 @@ def test_hop_env_steps_and_rewards_are_finite(hop_env):
     assert torch.allclose(microduck_mdp.skill_contact_schedule(env, "feet_ground_contact"), torch.ones(4))
 
 
-def test_hop_rsi_inside_and_outside_the_jump(hop_env):
+def test_hop_rsi_centred_on_the_crouch(hop_env):
     env = hop_env
     sk = env.command_manager.get_term("skill")
-    assert env.cfg.commands["skill"].rsi_jump_fraction == 0.5  # training cfg
-    robot = env.scene["robot"]
+    # training cfg of the feed-forward hop: no RSI inside the jump, most in the crouch before the push
+    assert env.cfg.commands["skill"].rsi_jump_fraction == 0.0
+    lo, hi = env.cfg.commands["skill"].rsi_focus_window
+    assert 0.5 < lo < hi < qdd_skill.flight_intervals(sk.spec["contact"])[0][0] - 0.05
     fast = sk.ref_fast_window.cpu().numpy()
-    jump = set(sk.rsi_jump_steps.tolist())
     sk.cfg.rsi_fraction = 1.0
     try:
-        for frac, inside in ((0.0, False), (1.0, True)):
-            sk.cfg.rsi_jump_fraction = frac
+        for foc in (0.0, 1.0):
+            sk.cfg.rsi_focus_fraction = foc
             env.reset()
             k0 = sk.k0.cpu().numpy()
-            assert np.all(k0 > 0)
-            if inside:
-                assert set(k0.tolist()) <= jump
-                env.sim.forward()
-                soles = robot.data.site_pos_w[:, [robot.find_sites(n)[0][0] for n in ("l_foot_site", "r_foot_site")], 2]
-                assert torch.all(soles > -0.005), soles  # not inside the floor
-            else:
-                assert not np.any(fast[k0])
+            assert np.all(k0 > 0) and not np.any(fast[k0])
+            if foc:
+                t = k0 * env.step_dt
+                assert np.all((t >= lo - 1e-6) & (t <= hi + 1e-6)), t
     finally:
         sk.cfg.rsi_fraction = 0.0
-        sk.cfg.rsi_jump_fraction = 0.5
+        sk.cfg.rsi_focus_fraction = env.cfg.commands["skill"].rsi_focus_fraction
+
+
+def test_reference_action_plays_the_table(hop_env):
+    env = hop_env
+    robot = env.scene["robot"]
+    term = env.action_manager.get_term("joint_pos")
+    assert isinstance(term, microduck_mdp.SkillReferenceJointPositionAction)
+    sk = env.command_manager.get_term("skill")
+    tb = sk.spec["_table"]
+    ids = robot.find_joints(QDD_JOINT_NAMES, preserve_order=True)[0]
+    env.reset()
+    gain = term.residual_gain
+    for a in (0.0, 1.0):
+        env.step(torch.full((4, 10), a))
+        # the last substep of step k = 0 / 1 was at t = k * dt + 3 * physics_dt
+        k = int(sk.step_index[0]) - 1
+        t = k * env.step_dt + (env.cfg.decimation - 1) * env.physics_dt
+        bias = robot.data.encoder_bias[0, ids]
+        want_q = qdd_skill.sample_table(tb, np.array([t]))[0]
+        res = qdd_skill.sample_table(tb, np.array([t]), "residual_scale")[0]
+        want_q = want_q + a * 0.25 * res * gain
+        got = (robot.data.joint_pos_target[0, ids] + bias).numpy()
+        assert np.allclose(got, want_q, atol=1e-5), (a, got - want_q)
+        assert np.allclose(robot.data.joint_vel_target[0, ids].numpy(), qdd_skill.sample_table(tb, np.array([t]), "dq")[0], atol=1e-5)
+        assert np.allclose(robot.data.joint_effort_target[0, ids].numpy(), qdd_skill.sample_table(tb, np.array([t]), "tau_ff")[0], atol=1e-5)
 
 
 # --- policy_io / cfg ----------------------------------------------------------------------
@@ -270,17 +366,25 @@ def test_hop_policy_io():
     io = build_skill_policy_io(spec)
     assert io["task"] == JUMP_TASK_ID and io["kind"] == "skill"
     sk = io["skill"]
-    assert sk["n_steps"] == 200 and sk["policy_dt_s"] == pytest.approx(0.02)
-    assert sk["contact_schedule"] == [
-        {"t": 0.0, "feet": "both"},
-        {"t": 1.39, "feet": "none"},
-        {"t": 1.55, "feet": "both"},
-    ]
+    total = spec["duration_s"] + spec["settle_s"]
+    assert sk["n_steps"] == round(total / 0.01) and sk["policy_dt_s"] == pytest.approx(0.01)
+    assert sk["contact_schedule"] == spec["contact"] and sk["contact_schedule"][1]["feet"] == "none"
     assert sk["flight"]["com_rise_m"] == 0.03 and sk["max_flight_s"] == 0.3
     assert sk["max_torso_pitch_deg"] == 40.0
     assert "torque_speed_envelope" in io["actuators"]
+    # the feed-forward table for the controller
+    r = sk["reference"]
+    assert r["format"] == qdd_skill.TABLE_FORMAT and r["joint_order"] == list(QDD_JOINT_NAMES)
+    n = len(r["q"])
+    assert len(r["dq"]) == len(r["tau_ff"]) == len(r["residual_scale"]) == n and (n - 1) * r["dt"] >= total - 1e-6
+    stand = qdd_skill.stand_pose()
+    assert np.allclose(r["q"][0], stand, atol=1e-3) and np.allclose(r["q"][-1], stand, atol=1e-3)
+    assert "reference" in io["action"]["target"]
     md = skill_onnx_metadata(spec)
     assert json.loads(md["policy_io"])["skill"]["name"] == "hop"
+    # the keyframe-only hop has no reference
+    kf = qdd_skill.validate_spec(_hop_raw())
+    assert "reference" not in build_skill_policy_io({**kf, "_sha256": "x", "_text": "{}"})["skill"]
 
 
 def test_policy_rate_100hz_cfg():

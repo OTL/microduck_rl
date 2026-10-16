@@ -379,13 +379,29 @@ class QddSkillOnPolicyRunner(MicroduckOnPolicyRunner):
     def __init__(self, env, train_cfg: dict, log_dir=None, device="cpu", **kwargs):
         super().__init__(env, train_cfg, log_dir, device, **kwargs)
         path = _qdd_skill_warm_start_onnx()
-        if path is not None:
+        try:
+            feedforward = env.unwrapped.command_manager.get_term("skill").spec.get("_table") is not None
+        except Exception:
+            feedforward = False
+        if feedforward:
+            # residual policy around a feed-forward table: from scratch, output ~ 0 (= the table alone)
+            import torch
+
+            from .qdd_biped_skill_env_cfg import REF_OUTPUT_INIT_GAIN
+
+            last = [m for m in self.alg.actor.modules() if isinstance(m, torch.nn.Linear)][-1]
+            with torch.no_grad():
+                last.weight.mul_(REF_OUTPUT_INIT_GAIN)
+                last.bias.zero_()
+            print(f"[skill] feed-forward skill: actor from scratch, output layer x {REF_OUTPUT_INIT_GAIN}")
+            path = None
+        elif path is not None:
             try:
                 loaded = init_actor_from_onnx(self.alg.actor, path)
                 print(f"[skill] warm start: actor initialised from {path} ({len(loaded)} tensors)")
             except Exception as e:  # a mismatch must not silently train garbage
                 raise RuntimeError(f"[skill] warm start from {path} failed: {e}") from e
-        else:
+        elif not feedforward:
             print("[skill] no warm start (training the actor from scratch)")
 
     def save(self, path: str, infos=None):

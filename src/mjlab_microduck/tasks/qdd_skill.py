@@ -56,6 +56,19 @@ speed (CoM rise <= 4 cm, <= 0.9 m/s: motor bus current and landing) and the
 landing load per foot (<= 4.5 m g: ankle-motor radial load) are bounded by the
 template (docs/jump-feasibility.md in the robot repo).
 
+Feed-forward reference table (schema 2, ``"reference_table": "hop_ref.json"``, a file
+in skills/ written by a tool -- the robot repo's analysis/hop_reference.py -- not by
+hand): rows every ``dt`` of the joint position target q, velocity target dq, torque
+feed-forward tau_ff and residual_scale. The low level plays it back (linear
+interpolation at the physics / control rate) and the policy action becomes a
+residual: q* = q(t) + action_scale * residual_scale(t) * a, dq* = dq(t), tau_ff(t).
+The dense joint reference (tracking reward, gates) is then the table's q instead of
+the keyframe interpolation; the keyframes stay as the human-readable outline. Gate:
+format, joint order, finite values, standing pose at rest with tau_ff = 0 at both
+ends, |tau_ff| <= TABLE_TAU_FRACTION x peak, residual_scale in TABLE_RESIDUAL_RANGE,
+take-off / touchdown of the table within CONTACT_TOL_S of the contact schedule, and
+the dense-reference checks below on the table's q.
+
 CLI:  python -m mjlab_microduck.tasks.qdd_skill <spec.json> [...]   (exit 1 on errors)
 """
 
@@ -127,6 +140,13 @@ LANDING_LOAD_RANGE_MG = (2.0, 4.5)  # per foot; GIM3510-8 radial limit 300 N = 4
 FLIGHT_KEYS = {"com_rise_m", "max_takeoff_speed_mps", "max_landing_load_mg", "toe_first"}
 CONTACT_TOL_S = 0.04  # take-off / touchdown may be this early / late (2 steps at 50 Hz)
 FLIGHT_DEFAULTS = {"max_takeoff_speed_mps": 0.85, "max_landing_load_mg": 4.0, "toe_first": True}
+# Feed-forward reference table (schema 2 "reference_table")
+TABLE_FORMAT = "mochi-skill-reference-1"
+TABLE_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,40}\.json$")
+TABLE_DT_RANGE_S = (0.001, 0.02)
+TABLE_TAU_FRACTION = 0.8  # |tau_ff| <= 0.8 x motor peak (the PD needs some headroom)
+TABLE_RESIDUAL_RANGE = (0.1, 1.0)
+TABLE_END_TOL = 1e-3  # rad / rad/s / N m at the first and last row
 
 # Reward weights a spec may set: name -> (min, max, default). Penalties are given
 # as magnitudes (the task applies them with a negative sign). Balance / contact /
@@ -164,8 +184,9 @@ TOP_KEYS = {
     "contact",
     "flight",
     "policy_rate_hz",
+    "reference_table",
 }
-V2_ONLY_KEYS = ("contact", "flight", "policy_rate_hz")
+V2_ONLY_KEYS = ("contact", "flight", "policy_rate_hz", "reference_table")
 REQUIRED_TOP_KEYS = ("schema_version", "name", "duration_s", "keyframes")
 KEYFRAME_KEYS = {"t", "joints_deg", "torso", "note"}
 TORSO_KEYS = {"pitch_deg", "roll_deg", "height_m"}
@@ -431,7 +452,19 @@ def takeoff_speed(com_rise_m: float) -> float:
     return math.sqrt(2.0 * G * com_rise_m)
 
 
-def build_reference_arrays(spec: dict, kf_t: np.ndarray, kf_q: np.ndarray, dt: float = POLICY_DT_S) -> dict:
+def sample_table(table: dict, times: np.ndarray, key: str = "q") -> np.ndarray:
+    """Linear interpolation of a reference-table column at the given times (held at
+    the last row after the end): [len(times), 10], or [len(times)] for residual_scale."""
+    a = np.asarray(table[key], dtype=float)
+    tt = np.arange(a.shape[0]) * float(table["dt"])
+    if a.ndim == 1:
+        return np.interp(times, tt, a)
+    return np.stack([np.interp(times, tt, a[:, j]) for j in range(a.shape[1])], axis=1)
+
+
+def build_reference_arrays(
+    spec: dict, kf_t: np.ndarray, kf_q: np.ndarray, dt: float = POLICY_DT_S, table: dict | None = None
+) -> dict:
     """Dense reference at the policy rate: index k = time k * dt since the skill
     started, k = 0 .. n (n = round((duration + settle) / dt)). Keys: t, q [n+1, 10]
     (absolute, rad), pitch, roll, height, quat [n+1, 4] (torso in the ground frame),
@@ -442,11 +475,15 @@ def build_reference_arrays(spec: dict, kf_t: np.ndarray, kf_q: np.ndarray, dt: f
     (push-off .. landing), height_window (push-off + flight: CoM height reference
     com_z_ref = flat-sole CoM, ballistic in flight), near_switch (within
     CONTACT_TOL_S of a scheduled take-off / touchdown), rsi_ok (reference-state
-    initialisation allowed: outside the fast window), flights [(t0, t1)]."""
+    initialisation allowed: outside the fast window), flights [(t0, t1)].
+    With a feed-forward ``table`` the joint reference q is the table's q."""
     total = spec["duration_s"] + spec["settle_s"]
     n = int(round(total / dt))
     t = np.arange(n + 1) * dt
-    q = sample_joint_reference(t, kf_t, kf_q, spec["interpolation"])
+    if table is not None:
+        q = sample_table(table, t, "q")
+    else:
+        q = sample_joint_reference(t, kf_t, kf_q, spec["interpolation"])
     fk = floor_kinematics()
     poses = [fk(x) for x in q]
     ref = {
@@ -525,7 +562,9 @@ def build_reference(spec: dict, dt: float | None = None) -> dict:
     to the spec's policy period."""
     kf_t = np.array([kf["t"] for kf in spec["keyframes"]], dtype=float)
     kf_q = np.array([kf["_q_rad"] for kf in spec["keyframes"]], dtype=float)
-    return build_reference_arrays(spec, kf_t, kf_q, spec.get("policy_dt_s", POLICY_DT_S) if dt is None else dt)
+    return build_reference_arrays(
+        spec, kf_t, kf_q, spec.get("policy_dt_s", POLICY_DT_S) if dt is None else dt, table=spec.get("_table")
+    )
 
 
 # =============================================================================
@@ -741,6 +780,9 @@ def validate_spec(spec) -> dict:
     contact = _validate_contact(spec, duration, errors)
     flight = _validate_flight(spec, contact, errors)
     flights = flight_intervals(contact)
+    table = None
+    if "reference_table" in spec and version >= 2:
+        table = _validate_table(spec["reference_table"], duration, settle, dt, flights, errors)
 
     def in_fast(t):
         return any(t0 - FAST_PRE_S - 1e-9 <= t <= t1 + LANDING_WINDOW_S + 1e-9 for t0, t1 in flights)
@@ -886,6 +928,7 @@ def validate_spec(spec) -> dict:
         t_arr,
         np.array(qs),
         dt,
+        table=table,
     )
     check_reference(ref, errors, flight=bool(flights))
     if errors:
@@ -906,9 +949,107 @@ def validate_spec(spec) -> dict:
         "keyframes": [dict(kf) for kf in kfs],
         "reward_weights": weights,
     }
+    if table is not None:
+        out["reference_table"] = spec["reference_table"]
+        out["_table"] = table
     for kf, q in zip(out["keyframes"], qs):
         kf["_q_rad"] = [float(x) for x in q]
     return out
+
+
+def load_table_text(name: str) -> str:
+    return (SKILLS_DIR / name).read_text(encoding="utf-8")
+
+
+def _validate_table(name, duration, settle, dt_policy: float, flights, errors: list[str]) -> dict | None:
+    """Gate for a feed-forward reference table (module docstring). Returns {name, dt,
+    q, dq, tau_ff, residual_scale (numpy), text, sha256, meta} or None."""
+    n_err = len(errors)
+    if not isinstance(name, str) or not TABLE_NAME_RE.match(name):
+        errors.append(f"reference_table: {name!r} must be a file name like 'hop_ref.json' in skills/")
+        return None
+    try:
+        text = load_table_text(name)
+        raw = json.loads(text)
+    except (OSError, json.JSONDecodeError) as e:
+        errors.append(f"reference_table: cannot read skills/{name} ({e})")
+        return None
+    if not isinstance(raw, dict) or raw.get("format") != TABLE_FORMAT:
+        errors.append(f"reference_table: format must be '{TABLE_FORMAT}'")
+        return None
+    names = list(_joint_names())
+    if raw.get("joint_order") != names:
+        errors.append(f"reference_table: joint_order must be {names}")
+    dt = raw.get("dt")
+    dt_max = min(TABLE_DT_RANGE_S[1], dt_policy)
+    if not _is_number(dt) or not TABLE_DT_RANGE_S[0] <= float(dt) <= dt_max + 1e-12:
+        errors.append(f"reference_table: dt {dt!r} must be in [{TABLE_DT_RANGE_S[0]}, {dt_max}] s")
+        return None
+    dt = float(dt)
+    arrs = {}
+    for key in ("q", "dq", "tau_ff", "residual_scale"):
+        try:
+            a = np.asarray(raw.get(key), dtype=float)
+        except (TypeError, ValueError):
+            errors.append(f"reference_table.{key}: must be a list of numbers")
+            continue
+        shape_ok = a.ndim == 1 if key == "residual_scale" else (a.ndim == 2 and a.shape[1] == len(names))
+        if not shape_ok or a.shape[0] < 2 or not np.all(np.isfinite(a)):
+            errors.append(f"reference_table.{key}: must be finite, {'[n]' if key == 'residual_scale' else '[n, 10]'}")
+            continue
+        arrs[key] = a
+    if len(errors) > n_err:
+        return None
+    lengths = {a.shape[0] for a in arrs.values()}
+    if len(lengths) != 1:
+        errors.append(f"reference_table: q / dq / tau_ff / residual_scale have different lengths {sorted(lengths)}")
+        return None
+    n_rows = lengths.pop()
+    if duration is not None and (n_rows - 1) * dt < duration - 1e-9:
+        errors.append(f"reference_table: covers {(n_rows - 1) * dt:.3f} s, less than duration_s {duration}")
+    stand = stand_pose()
+    for row, where in ((0, "first"), (n_rows - 1, "last")):
+        if (
+            np.abs(arrs["q"][row] - stand).max() > TABLE_END_TOL
+            or np.abs(arrs["dq"][row]).max() > TABLE_END_TOL
+            or np.abs(arrs["tau_ff"][row]).max() > TABLE_END_TOL
+        ):
+            errors.append(
+                f"reference_table: the {where} row must be the standing pose at rest with tau_ff = 0 (the walking "
+                f"policy hands over / takes over there)"
+            )
+    from mjlab_microduck.robot.qdd_biped_constants import ANKLE_PEAK, GIM6010_PEAK
+
+    peak = np.array([ANKLE_PEAK if n_.endswith("ankle_pitch") else GIM6010_PEAK for n_ in names])
+    over = np.abs(arrs["tau_ff"]) / (TABLE_TAU_FRACTION * peak)
+    if over.max() > 1.0 + 1e-9:
+        k, j = np.unravel_index(np.argmax(over), over.shape)
+        errors.append(
+            f"reference_table: tau_ff {names[j]} {arrs['tau_ff'][k, j]:.2f} N m at t = {k * dt:.3f} s exceeds "
+            f"{TABLE_TAU_FRACTION} x the motor peak {peak[j]} N m"
+        )
+    rs = arrs["residual_scale"]
+    if rs.min() < TABLE_RESIDUAL_RANGE[0] - 1e-9 or rs.max() > TABLE_RESIDUAL_RANGE[1] + 1e-9:
+        errors.append(f"reference_table: residual_scale must be in {list(TABLE_RESIDUAL_RANGE)}")
+    for key, sched in (("t_takeoff", [f[0] for f in flights]), ("t_touchdown", [f[1] for f in flights])):
+        v = raw.get(key)
+        if sched and (not _is_number(v) or abs(float(v) - sched[0]) > CONTACT_TOL_S + 1e-9):
+            errors.append(
+                f"reference_table.{key}: {v!r} must be within {CONTACT_TOL_S} s of the contact schedule ({sched[0]})"
+            )
+    if len(errors) > n_err:
+        return None
+    return {
+        "name": name,
+        "dt": dt,
+        "q": arrs["q"],
+        "dq": arrs["dq"],
+        "tau_ff": arrs["tau_ff"],
+        "residual_scale": arrs["residual_scale"],
+        "text": text,
+        "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        "meta": {k: raw[k] for k in ("rise_m", "takeoff_speed_mps", "t_takeoff", "t_touchdown") if k in raw},
+    }
 
 
 def check_reference(ref: dict, errors: list[str], flight: bool = False) -> None:
