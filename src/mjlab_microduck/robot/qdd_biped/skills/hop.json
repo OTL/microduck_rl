@@ -96,7 +96,7 @@
     "joint_tracking": 2.0,
     "torso_orientation": 1.5,
     "feet_contact": 2.0,
-    "flight_height": 3.0,
+    "flight_height": 5.0,
     "landing_load": 1.0
   }
 }

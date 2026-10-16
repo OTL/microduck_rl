@@ -120,6 +120,8 @@ REF_RSI_FOCUS_FRACTION = 0.7  # ... and of those, in the crouch just before the 
 REF_RSI_FOCUS_LEAD_S = 0.5  # focus window = [push start - this, push start - 0.02 s]
 REF_TERMINATION_WEIGHT = -50.0  # x dt (10 ms) = -0.5 per fall
 REF_RESIDUAL_WEIGHT = 0.05  # |a|^2 cost
+REF_BUS_THRESHOLD_A = 20.0  # bus current cost above this (LM5069 trips at 32-41 A)
+REF_BUS_WEIGHT = 0.05  # x relu(I - 20 A)^2
 REF_RESIDUAL_GAIN_START = 0.5
 REF_RESIDUAL_RAMP_ITERS = 300
 REF_INIT_STD = 0.5
@@ -278,6 +280,9 @@ def _make_reference_action(cfg: ManagerBasedRlEnvCfg, spec: dict, play: bool) ->
     r = cfg.rewards
     r["termination"] = RewardTermCfg(func=mj_rewards.is_terminated, weight=REF_TERMINATION_WEIGHT)
     r["residual_l2"] = RewardTermCfg(func=microduck_mdp.skill_residual_l2, weight=-REF_RESIDUAL_WEIGHT)
+    r["bus_current"] = RewardTermCfg(
+        func=microduck_mdp.skill_bus_current_cost, weight=-REF_BUS_WEIGHT, params={"threshold_a": REF_BUS_THRESHOLD_A}
+    )
 
 
 def _push_start(spec: dict) -> float:

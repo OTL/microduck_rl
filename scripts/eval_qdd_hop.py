@@ -162,6 +162,9 @@ def run(onnx_path: str, play: bool, n_envs: int, seed: int = 0) -> dict:
         r["takeoff_vz"] = float(com_vz[b].max())
         r["peak_foot_mg"] = float(fz5[b].max())
         r["bus_a"] = float(bus5[b].max())
+        r["t_bus_peak"] = float(bus5[b].argmax()) * dt_sub  # s since the skill started (5 ms window start)
+        if flights:
+            r["t_bus_peak_rel_takeoff"] = r["t_bus_peak"] - r["t_takeoff"]
         r["max_w"] = sub["w"][b].tolist()
         r["max_tau"] = sub["tau"][b].tolist()
         r["max_util"] = float(sub["util"][b].max())

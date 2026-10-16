@@ -279,7 +279,8 @@ def test_hop_env_physics_actuators_and_terms(hop_env):
         assert w[rew] > 0, rew
     fh = env.scene.sensors["feet_ground_contact"].data.force_history
     assert fh is not None and fh.shape[2] == 4
-    assert w["residual_l2"] < 0 and w["termination"] == pytest.approx(-50.0)
+    assert w["residual_l2"] < 0 and w["bus_current"] < 0 and w["termination"] == pytest.approx(-50.0)
+    assert w["flight_height"] == pytest.approx(5.0)
 
 
 def test_envelope_clips_motoring_torque(hop_env):
@@ -306,6 +307,7 @@ def test_hop_env_steps_and_rewards_are_finite(hop_env):
     # standing still: per-foot load ~0.5 m g, no landing cost, no take-off cost
     assert float(microduck_mdp.skill_landing_load_cost(env, "feet_ground_contact", 4.0).max()) == 0.0
     assert float(microduck_mdp.skill_takeoff_speed_cost(env, 0.85).max()) == 0.0
+    assert float(microduck_mdp.skill_bus_current_cost(env, 20.0).max()) == 0.0
     # schedule: both feet down before the take-off pays 1
     assert torch.allclose(microduck_mdp.skill_contact_schedule(env, "feet_ground_contact"), torch.ones(4))
 

@@ -8683,3 +8683,32 @@ def skill_residual_gain_curriculum(
     x = min(1.0, env.common_step_counter / max(1, ramp_steps))
     term.residual_gain = start + (end - start) * x
     return torch.tensor(term.residual_gain)
+
+
+def skill_bus_current_cost(
+    env: ManagerBasedRlEnv,
+    threshold_a: float = 20.0,
+    v_bus: float = 22.0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """COST (>= 0): relu(I_bus - threshold)^2 [A^2], I_bus = motor bus current of the
+    electrical model of the robot repo's analysis/hop.py (GIM6010-8: tau w + 1.5 R
+    (tau / Kt)^2, GIM3510-8: tau w / 0.7 motoring, x 0.7 braking; / v_bus). The
+    LM5069 hot-swap trips at 32-41 A for 4.7 ms: keep the hop well below."""
+    from mjlab_microduck.actuator.qdd_motor import KT_6010, R_PH_6010
+
+    asset: Entity = env.scene[asset_cfg.name]
+    cache = env.__dict__.setdefault("_qdd_ankle_mask", {})
+    if id(asset) not in cache:
+        cache[id(asset)] = torch.tensor(
+            [n.endswith("ankle_pitch") for n in asset.joint_names], device=env.device
+        )
+    ankle = cache[id(asset)]
+    tau = asset.data.qfrc_actuator
+    w = asset.data.joint_vel
+    p6010 = tau * w + 1.5 * R_PH_6010 * torch.square(tau / KT_6010)
+    pm = tau * w
+    pank = torch.where(pm > 0, pm / 0.7, pm * 0.7)
+    i_bus = torch.where(ankle, pank, p6010).sum(dim=1) / v_bus
+    env.extras["log"]["Metrics/hop_bus_a_max"] = torch.nan_to_num(i_bus).max()
+    return torch.nan_to_num(torch.square(torch.clamp(i_bus - threshold_a, min=0.0)), nan=0.0)
