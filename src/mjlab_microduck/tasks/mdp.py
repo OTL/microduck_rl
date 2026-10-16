@@ -7922,6 +7922,7 @@ def stand_square_stance(
     pose_std: float,
     command_name: str = "gait",
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    coarse_scale: float = 1.0,
 ) -> torch.Tensor:
     """REWARD in [0, 1], only while the gait clock is paused (command ~ 0):
     mean of four Gaussian kernels for a square, settled stance
@@ -7931,7 +7932,13 @@ def stand_square_stance(
         neither foot is down),
       - joint pose -> default (sum of squared deviations, rad^2).
     Walking envs get 0. gait2 stopped wherever the stride was (hip pitch 0.18
-    rad apart), and a skill started from that stance yawed ~7 deg."""
+    rad apart), and a skill started from that stance yawed ~7 deg.
+
+    ``coarse_scale`` > 1 (gait4): the offset and hip-pitch kernels become the
+    mean of the fine kernel and a coarse one (std x coarse_scale). A typical
+    mid-stride stop (8 cm, 0.18 rad apart) is ~4 std of the fine kernels away,
+    where they have no gradient, so gait3 took up to 3.7 s to square up.
+    coarse_scale = 1 is the gait3 reward exactly."""
     from mjlab.sensor import ContactSensor
 
     asset: Entity = env.scene[asset_cfg.name]
@@ -7943,7 +7950,11 @@ def stand_square_stance(
     d = p[:, 0] - p[:, 1]
     yaw = asset.data.heading_w
     dx = torch.cos(yaw) * d[:, 0] + torch.sin(yaw) * d[:, 1]
-    r_offset = torch.exp(-torch.square(dx) / offset_std**2)
+    def _k2(x: torch.Tensor, std: float) -> torch.Tensor:
+        x2 = torch.square(x)
+        return 0.5 * (torch.exp(-x2 / std**2) + torch.exp(-x2 / (coarse_scale * std) ** 2))
+
+    r_offset = _k2(dx, offset_std)
 
     ids = getattr(env, "_qdd_hip_pitch_ids", None)
     if ids is None:
@@ -7951,7 +7962,7 @@ def stand_square_stance(
         env._qdd_hip_pitch_ids = ids
     q = asset.data.joint_pos
     dhp = q[:, ids[0]] - q[:, ids[1]]
-    r_hip = torch.exp(-torch.square(dhp) / hip_pitch_std**2)
+    r_hip = _k2(dhp, hip_pitch_std)
 
     assert sensor.data.force is not None
     f = torch.norm(sensor.data.force, dim=-1)  # [B, 2]
@@ -7967,7 +7978,41 @@ def stand_square_stance(
     return torch.nan_to_num(r * standing, nan=0.0)
 
 
+@requires_model_fields("geom_solref")
+def geom_solref_timeconst(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor | None,
+    ranges: tuple[float, float],
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    shared_random: bool = True,
+) -> None:
+    """EVENT: contact softness DR. Samples the contact time constant solref[0]
+    [s] of the asset's geoms (uniform, absolute); the damping ratio solref[1]
+    is left as is. The QDD feet have geom priority 1 over the floor, so their
+    solref is the one MuJoCo uses for foot-floor contacts (no mixing).
+
+    MuJoCo's refsafe (on by default) clamps solref[0] to >= 2 x timestep, i.e.
+    to 10 ms at the 5 ms training step: values below that act as 10 ms."""
+    from mjlab.envs.mdp.dr._core import _randomize_model_field
+
+    _randomize_model_field(
+        env,
+        env_ids,
+        "geom_solref",
+        entity_type="geom",
+        ranges=ranges,
+        distribution="uniform",
+        operation="abs",
+        asset_cfg=asset_cfg,
+        axes=[0],
+        shared_random=shared_random,
+        default_axes=[0],
+        valid_axes=[0, 1],
+    )
+
+
 def feet_tilt_near_ground(
+
     env: ManagerBasedRlEnv,
     sensor_name: str,
     height_threshold: float = 0.02,

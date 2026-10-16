@@ -1,4 +1,5 @@
-"""QDD biped (6.36 kg, ~0.52 m, 10 quasi-direct-drive joints) robot cfg for mjlab.
+"""QDD biped (6.61 kg,
+ ~0.52 m, 10 quasi-direct-drive joints) robot cfg for mjlab.
 
 Source of truth is the robot repo (robot/model.py); qdd_biped/qdd_biped.xml is
 generated from it by qdd_biped/generate_mjcf.py. Values copied here by hand:
@@ -60,8 +61,9 @@ DEFAULT_JOINT_POS = {
     r".*_ankle_pitch": -_k / 2,
 }
 # Torso-origin height with the soles on the floor in that pose: yaw->roll 0.064 +
-# 2 * 0.13 * cos(22.5 deg) + ankle->sole 0.040 = 0.3442 m (checked with MuJoCo).
-STAND_BASE_Z = 0.3442
+# 2 * 0.13 * cos(22.5 deg) + ankle->sole 0.050 = 0.3542 m (checked with MuJoCo).
+# ankle->sole = PA12 sole 40 mm + 10 mm TPU landing pad (robot repo 31cceba).
+STAND_BASE_Z = 0.3542
 
 HOME_FRAME = EntityCfg.InitialStateCfg(
     pos=(0.0, 0.0, STAND_BASE_Z + 0.005),

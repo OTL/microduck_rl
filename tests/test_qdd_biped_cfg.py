@@ -46,7 +46,8 @@ def test_model_names_resolve():
     for s in ("imu_ang_vel", "imu_lin_vel", "root_angmom"):
         m.sensor(s)
     assert m.nu == 0  # actuators come from the mjlab cfg, not the XML
-    assert abs(m.body_subtreemass[1] - 6.479) < 0.01  # robot repo model: strengthened, GIM3510-8 ankle, cable covers
+    assert abs(m.body_subtreemass[1] - 6.607) < 0.01  # robot repo model: + 10 mm TPU sole pads, A7075 yaw/roll brackets
+
 
 
 def test_stand_height_puts_soles_on_floor():
@@ -446,3 +447,78 @@ def test_stand_square_rewards_square_stance_only(live_env):
     assert torch.all(microduck_mdp.stand_square_stance(env, "feet_ground_contact", **kw) == 0.0)
     gait.active[:] = False
     env.reset()
+
+
+def test_stand_square_coarse_kernels_keep_a_gradient(live_env):
+    """gait4: coarse_scale=1 is the gait3 reward; coarse_scale=3 still pays (and
+    grades) a mid-stride stop that the fine kernels alone score ~0."""
+    env = live_env
+    _stand(env, steps=50)
+    feet = _feet(env)
+    kw = dict(offset_std=0.02, hip_pitch_std=0.05, load_std=0.15, pose_std=0.2, asset_cfg=feet)
+    robot = env.scene["robot"]
+    ids, _ = robot.find_joints(("l_hip_pitch", "r_hip_pitch"), preserve_order=True)
+    q0 = robot.data.joint_pos.clone()
+    env.extras.setdefault("log", {})
+
+    def r_at(split, **extra):
+        q = q0.clone()
+        q[:, ids[0]] -= split
+        q[:, ids[1]] += split
+        robot.write_joint_state_to_sim(q, torch.zeros_like(q))
+        env.sim.forward()
+        return microduck_mdp.stand_square_stance(env, "feet_ground_contact", **kw, **extra)
+
+    assert torch.allclose(r_at(0.1), r_at(0.1, coarse_scale=1.0))
+    fine_far, fine_near = r_at(0.12), r_at(0.08)
+    coarse_far, coarse_near = r_at(0.12, coarse_scale=3.0), r_at(0.08, coarse_scale=3.0)
+    # the coarse kernels add a clear gradient towards square (with the fine
+    # ones only the pose kernel grades 0.24 vs 0.16 rad apart)
+    gain_fine, gain_coarse = fine_near - fine_far, coarse_near - coarse_far
+    assert torch.all(gain_coarse > gain_fine + 0.05), (gain_coarse, gain_fine)
+
+    assert torch.all(coarse_far > fine_far)
+    # square stance still scores high
+    assert torch.all(r_at(0.0, coarse_scale=3.0) > 0.8)
+    env.reset()
+
+
+def test_foot_solref_randomization_cfg():
+    from mjlab_microduck.tasks.qdd_biped_velocity_env_cfg import FOOT_SOLREF_TIMECONST_RANGE
+
+    train = make_qdd_biped_velocity_env_cfg()
+    ev = train.events["foot_solref"]
+    assert ev.func is microduck_mdp.geom_solref_timeconst
+    assert tuple(ev.params["asset_cfg"].geom_names) == FOOT_GEOMS
+    assert ev.params["ranges"] == FOOT_SOLREF_TIMECONST_RANGE == (0.004, 0.020)
+    assert "foot_solref" not in make_qdd_biped_velocity_env_cfg(play=True).events
+    # foot geoms win the contact-parameter priority against the floor
+    m = _model()
+    for g in FOOT_GEOMS:
+        assert np.allclose(m.geom(g).solref, (0.02, 1.0))
+
+
+def test_foot_solref_randomization_live():
+    """The event writes solref[0] of both feet (shared per env) in range and
+    leaves the damping ratio and all other geoms alone."""
+    from mjlab.envs import ManagerBasedRlEnv
+
+    cfg = make_qdd_biped_velocity_env_cfg()
+    cfg.scene.num_envs = 8
+    env = ManagerBasedRlEnv(cfg=cfg, device="cpu")
+    try:
+        env.reset()
+        robot = env.scene["robot"]
+        sol = env.sim.model.geom_solref  # [num_envs, ngeom, 2]
+        m = env.sim.mj_model
+        foot = [m.geom(f"robot/{g}").id for g in FOOT_GEOMS]
+        tc = sol[:, foot, 0]
+        assert torch.all((tc >= 0.004) & (tc <= 0.020)), tc
+        assert torch.allclose(tc[:, 0], tc[:, 1])  # one pad material per robot
+        assert tc[:, 0].std() > 1e-3  # varies across envs
+        assert torch.allclose(sol[:, foot, 1], torch.ones_like(sol[:, foot, 1]))
+        others = [i for i in range(m.ngeom) if i not in foot]
+        assert torch.allclose(sol[:, others, 0], torch.full_like(sol[:, others, 0], 0.02))
+        del robot
+    finally:
+        env.close()

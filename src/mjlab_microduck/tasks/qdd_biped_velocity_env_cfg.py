@@ -1,6 +1,6 @@
 """QDD biped velocity (walking) environment — Mjlab-Velocity-Flat-QddBiped.
 
-A different robot from the microduck: 6.48 kg, ~0.52 m tall, 10 quasi-direct-
+A different robot from the microduck: 6.61 kg, ~0.53 m tall, 10 quasi-direct-
 drive joints ({l,r}_{hip_yaw, hip_roll, hip_pitch, knee, ankle_pitch}), no ankle
 roll (lateral balance must be dynamic, like Disney BDX / Open Duck Mini), flat
 150 x 70 mm feet centred under the ankle. Robot model:
@@ -99,6 +99,12 @@ EFFORT_LIMIT_RANDOMIZATION_RANGE = (0.8, 1.05)  # battery sag / driver current l
 ARMATURE_RANDOMIZATION_RANGE = (0.8, 1.2)  # rotor inertia is an estimate
 JOINT_FRICTION_RANDOMIZATION_RANGE = (0.5, 2.0)  # x XML frictionloss 0.05 Nm
 FOOT_FRICTION_RANGE = (0.4, 1.2)
+# Contact softness (gait4): 10 mm TPU 95A sole pad under each foot; its
+# compliance is about MuJoCo's default solref time constant (0.02 s). Sampled
+# per reset for the foot geoms (priority 1 -> used for foot-floor contacts).
+# Below 2 x timestep (10 ms at 5 ms) MuJoCo's refsafe clamps it to 10 ms.
+ENABLE_FOOT_SOLREF_RANDOMIZATION = True
+FOOT_SOLREF_TIMECONST_RANGE = (0.004, 0.020)  # s
 VELOCITY_PUSH_INTERVAL_S = (3.0, 6.0)
 VELOCITY_PUSH_RANGE = (-0.3, 0.3)  # m/s, x and y
 IMU_ORIENTATION_RANDOMIZATION_ANGLE = 3.0  # deg, random axis, constant per env
@@ -130,6 +136,10 @@ STAND_OFFSET_STD = 0.02  # m, fore-aft l-r sole offset
 STAND_HIP_PITCH_STD = 0.05  # rad, l-r hip pitch difference
 STAND_LOAD_STD = 0.15  # left share of the sole force vs 0.5
 STAND_POSE_STD = 0.2  # sqrt(sum of squared joint deviations), rad
+# gait4: offset / hip-pitch kernels = mean of the fine kernel and a 3x wider
+# one, so a mid-stride stop (8 cm / 0.18 rad apart, ~4 fine std) still has a
+# gradient towards squaring up (gait3 needed up to 3.7 s).
+STAND_COARSE_SCALE = 3.0
 # The clock stops wherever the stride was (the controller does the same: it
 # only advances while the command is active), so for this long after a stop
 # the contact schedule does not insist on both feet down: one settling step
@@ -334,6 +344,7 @@ def make_qdd_biped_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             "hip_pitch_std": STAND_HIP_PITCH_STD,
             "load_std": STAND_LOAD_STD,
             "pose_std": STAND_POSE_STD,
+            "coarse_scale": STAND_COARSE_SCALE,
             "command_name": "gait",
             "asset_cfg": deepcopy(feet),
         },
@@ -394,7 +405,8 @@ def make_qdd_biped_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.terminations["fell_over"].params["limit_angle"] = math.radians(60.0)
     cfg.terminations["torso_low"] = TerminationTermCfg(
         func=mdp.root_height_below_minimum,
-        params={"minimum_height": 0.20},  # standing 0.344, full 120 deg crouch ~0.23
+        params={"minimum_height": 0.20},  # standing 0.354, full 120 deg crouch ~0.24
+
     )
     cfg.terminations["body_ground_contact"] = TerminationTermCfg(
         func=mdp.illegal_contact,
@@ -416,6 +428,16 @@ def make_qdd_biped_velocity_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.events["reset_base"].params["pose_range"]["z"] = (0.0, 0.005)
     cfg.events["foot_friction"].params["asset_cfg"].geom_names = FOOT_GEOMS
     cfg.events["foot_friction"].params["ranges"] = FOOT_FRICTION_RANGE
+    if ENABLE_FOOT_SOLREF_RANDOMIZATION:
+        cfg.events["foot_solref"] = EventTermCfg(
+            func=microduck_mdp.geom_solref_timeconst,
+            mode="reset",
+            params={
+                "asset_cfg": SceneEntityCfg("robot", geom_names=FOOT_GEOMS),
+                "ranges": FOOT_SOLREF_TIMECONST_RANGE,
+                "shared_random": True,  # one pad material per robot
+            },
+        )
 
     if ENABLE_COM_RANDOMIZATION:
         cfg.events["base_com"].params["asset_cfg"].body_names = (TORSO_BODY,)
@@ -597,6 +619,7 @@ def _make_play_nominal(cfg: ManagerBasedRlEnvCfg) -> None:
         "base_com",
         "encoder_bias",
         "foot_friction",  # -> nominal 0.8 from the collision cfg
+        "foot_solref",  # -> nominal 0.02 s (MuJoCo default)
         "randomize_mass_inertia",
         "randomize_pd_gains",
         "randomize_effort_limits",
