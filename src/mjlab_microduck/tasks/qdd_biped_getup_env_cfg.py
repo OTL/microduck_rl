@@ -117,6 +117,18 @@ STAND_STILL_WEIGHT = 1.0
 STAND_POSE_WEIGHT = 1.5
 STAND_POSE_STD = 0.25  # rad, sqrt of the summed squared joint errors
 
+# Following the found get-up in time (getup_demo_tracking). getup1-5: from
+# lying still the policy never started the 0.6 s flip that begins the get-up
+# (it raises neither height nor uprightness, so getup_progress pays nothing);
+# getup4/5 stood only from states already moving along the demo. A guide, not
+# the goal: per step at most DEMO_TRACK_WEIGHT (~0.5 x the standing pay),
+# lowered once the get-up exists so the policy can improve on the demo.
+DEMO_TRACK_WEIGHT = 1.5
+DEMO_TRACK_LATE_WEIGHT = 0.5
+DEMO_TRACK_LATE_ITER = 1500
+DEMO_TRACK_STD_Q = 1.0  # rad, sqrt of the summed squared joint errors
+DEMO_TRACK_STD_G = 0.5  # torso gravity direction (unit vector) error
+
 # Violence / hardware.
 TORSO_ANG_VEL_LIMIT = 7.0  # rad/s, cost above (the found get-up swings the torso at up to 6 rad/s)
 TORSO_ANG_VEL_WEIGHT = -0.5
@@ -206,6 +218,11 @@ def make_qdd_biped_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         weight=STAND_POSE_WEIGHT,
         params={**sense, "std": STAND_POSE_STD},
     )
+    cfg.rewards["demo_tracking"] = RewardTermCfg(
+        func=microduck_mdp.getup_demo_tracking,
+        weight=DEMO_TRACK_WEIGHT,
+        params={"std_q": DEMO_TRACK_STD_Q, "std_g": DEMO_TRACK_STD_G},
+    )
     cfg.rewards["torso_ang_vel"] = RewardTermCfg(
         func=microduck_mdp.torso_ang_vel_excess,
         weight=TORSO_ANG_VEL_WEIGHT,
@@ -269,6 +286,16 @@ def make_qdd_biped_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "steps": {"bridge_prone": BRIDGE_STEP, "bridge_supine": BRIDGE_STEP},
                 "promote_at": PATH_PROMOTE_AT,
                 "window": PATH_PROMOTE_WINDOW,
+            },
+        ),
+        "demo_tracking_weight": CurriculumTermCfg(
+            func=microduck_mdp.reward_weight,
+            params={
+                "reward_name": "demo_tracking",
+                "weight_stages": [
+                    {"step": 0, "weight": DEMO_TRACK_WEIGHT},
+                    {"step": DEMO_TRACK_LATE_ITER * NUM_STEPS_PER_ENV, "weight": DEMO_TRACK_LATE_WEIGHT},
+                ],
             },
         ),
         # Smoothness only after the get-up exists (AGENTS.md: no attempt-tax

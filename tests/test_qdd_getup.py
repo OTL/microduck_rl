@@ -428,3 +428,50 @@ def test_getup_bridge_frontier_moves_on_its_own(getup_train_env, monkeypatch):
     idx = term._sample(5000, {"bridge_prone": 1.0}, "cpu")
     assert torch.all(term.level[idx] <= term.frontier["bridge_prone"] + 1e-6)
     term.frontier.update(start)
+
+
+def test_getup_demo_tracking_scores_the_demo_and_its_mirror(getup_train_env):
+    env = getup_train_env
+    term = env.event_manager.get_term_cfg("reset_getup").func
+    tr = env.reward_manager.get_term_cfg("demo_tracking").func
+    robot = env.scene["robot"]
+    demo = np.load(rc.QDD_GETUP_DEMO_NPZ)
+    path = torch.nonzero(term.demo_frame >= 0).squeeze(1)
+    # a path state from the prone demo, frame 40 (mid-flip)
+    j = int(path[(term.demo_frame[path] == 40)][0]) if (term.demo_frame[path] == 40).any() else int(path[0])
+    f = int(term.demo_frame[j])
+    names = list(rc.QDD_JOINT_NAMES)
+    order = [names.index(n) for n in robot.joint_names]
+    qp = torch.tensor(demo["qpos"][f], dtype=torch.float32)
+    ids = torch.arange(env.num_envs)
+    root = torch.zeros(env.num_envs, 13)
+    root[:, :3] = env.scene.env_origins
+    root[:, 2] += 0.3
+    root[:, 3:7] = qp[3:7]
+    jp = qp[7:][order].repeat(env.num_envs, 1)
+    # env 1: the mirror image (legs swapped, hip yaw/roll negated, y -> -y)
+    m = qp.numpy().copy()
+    from importlib.util import module_from_spec, spec_from_file_location
+    from pathlib import Path
+
+    spec = spec_from_file_location("qgs", Path(__file__).resolve().parents[1] / "scripts" / "qdd_getup_states.py")
+    mod = module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    mq, _ = mod._mirror(m.astype(np.float64), np.zeros(16))
+    root[1, 3:7] = torch.tensor(mq[3:7], dtype=torch.float32)
+    jp[1] = torch.tensor(mq[7:], dtype=torch.float32)[order]
+    robot.write_root_state_to_sim(root, env_ids=ids)
+    robot.write_joint_state_to_sim(jp, torch.zeros(env.num_envs, 10), env_ids=ids)
+    env.sim.forward()
+    term.index[:] = j
+    env.episode_length_buf[:] = 1  # first step: reference frame = the state's own frame
+    r = tr(env, **env.reward_manager.get_term_cfg("demo_tracking").params)
+    assert r[0] > 0.95 and r[1] > 0.95
+    # far ahead in time: the reference has ended (prone demo: 170 frames)
+    env.episode_length_buf[:] = 400
+    assert torch.all(tr(env, **env.reward_manager.get_term_cfg("demo_tracking").params) == 0)
+    # crouch and standing starts: nothing
+    env.episode_length_buf[:] = 1
+    term.index[:] = int(torch.nonzero(term.kind == term.kinds.index("crouch"))[0, 0])
+    term.index[0] = -1
+    assert torch.all(tr(env, **env.reward_manager.get_term_cfg("demo_tracking").params) == 0)

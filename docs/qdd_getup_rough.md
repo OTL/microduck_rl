@@ -111,6 +111,12 @@ uv run python -m mjlab_microduck.tasks.qdd_biped_getup_env_cfg   # policy_io_get
   - それぞれに境目（alpha 0.1 から 0.1 ずつ）を持たせ、path とは別に進める（寝返りが止まっても、うつ伏せ側は進める）。
   - 開始の割合：path 35%・bridge_prone 20%・bridge_supine 15%・push 10%・crouch 10%・stride 5%・drop 5%。
   - wandb：`frontier_bridge_*`・`band_stood_bridge_*`、本当の転倒を向きで分けた `end_stood_fall_prone`・`end_stood_fall_supine`。
+  - 結果（668 反復で切り上げ）：bridge の境目は 2 つとも 0.1 から動かず、bridge から始めた回は 1 本も立てなかった。alpha ≒ 0 の bridge は動きの最初の姿勢とほぼ同じ（違いは速度だけ）なので、止まった状態から動きを始められないことがわかった。
+- getup6：見つけた動きを時間どおりになぞると報酬（`mdp.getup_demo_tracking`）。
+  - うつ伏せの動きは最初の 0.6 秒、体を返す間は高さも起き具合も上がらないので、`getup_progress` が何も払わない。getup4/5 で立てたのは、もう動き出している状態からだけだった。
+  - 関節の位置（二乗誤差の和、std 1.0 rad）× 胴の重力の向き（std 0.5）。動きとその左右反転の良いほう。
+  - 参照：path はその状態のコマから、寝た姿勢（bridge・本当の転倒）はうつ伏せならうつ伏せの動き、仰向けなら寝返り → うつ伏せの動き、の最初から。参照が終わったら 0。しゃがみ・立った開始は 0。
+  - 重み 1.5（立っている報酬の半分ほど）、1500 反復から 0.5 に下げる（動きをなぞるのは手がかりで、目的ではない）。
 
 ### わかっていないこと
 

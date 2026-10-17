@@ -8241,6 +8241,8 @@ class reset_from_getup_states:
         self.n = self.root_z.shape[0]
         rs = data["remain_s"] if "remain_s" in data.files else np.full(n, -1.0, np.float32)
         al = data["alpha"] if "alpha" in data.files else np.full(n, -1.0, np.float32)
+        df = data["demo_frame"] if "demo_frame" in data.files else np.full(n, -1, np.int32)
+        self.demo_frame = torch.tensor(df, dtype=torch.long, device=dev)  # path: demo npz row
         self.remain_s = torch.tensor(rs, dtype=torch.float32, device=dev)
         # curriculum level per state: path = remain_s, bridge_* = alpha
         self.level = torch.where(
@@ -8549,6 +8551,104 @@ class getup_path_frontier:
             out["band_stood" if k == "path" else f"band_stood_{k}"] = self.last_rate.get(k, 0.0)
         out.update({f"end_stood_{k}": v for k, v in self.ema.items()})
         return out
+
+
+class getup_demo_tracking:
+    """REWARD in [0, 1]: follow the get-up found by the keyframe search
+    (getup_demo_traj.npz) in time from the start of the episode: joint
+    positions (Gaussian on the summed squared error, ``std_q``) x torso
+    gravity direction (``std_g``), the better of the demo and its mirror
+    image (either leg may lead). The reference per start (reset_getup's
+    library index): a path state follows its demo from its own frame; a
+    lying start (bridges, real falls) follows the prone get-up if it lies on
+    its front, else the supine roll followed by the prone get-up, from the
+    first frame. Pays nothing once the reference has ended, and for standing /
+    crouch starts. It gives the start of the get-up (0.6 s of flipping over
+    that raise neither height nor uprightness, so getup_progress pays nothing
+    for them) a signal: getup4/5 stood from states already moving along the
+    demo, never from lying still."""
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+        from mjlab_microduck.robot import qdd_biped_constants as rc
+
+        dev = env.device
+        asset: Entity = env.scene[cfg.params.get("asset_cfg", _DEFAULT_ASSET_CFG).name]
+        dd = np.load(cfg.params.get("demo_path", str(rc.QDD_GETUP_DEMO_NPZ)))
+        Q, demo = dd["qpos"].astype(np.float64), dd["demo"]
+        names = list(rc.QDD_JOINT_NAMES)
+        order = [names.index(n) for n in asset.joint_names]
+        w, x, y, z = Q[:, 3:7].T
+        # torso gravity direction in the body frame: -(third row of R)
+        g = -np.stack([2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)], axis=1)
+        feat = np.concatenate([Q[:, 7:][:, order], g], axis=1)
+        f0, f1 = np.flatnonzero(demo == 0), np.flatnonzero(demo == 1)
+        refs = [feat[f0], np.concatenate([feat[f1], feat[f0]])]
+        T = max(len(r) for r in refs)
+        R = np.zeros((2, T, feat.shape[1]), np.float32)
+        for i, r in enumerate(refs):
+            R[i, : len(r)] = r
+        self.ref = torch.tensor(R, device=dev)
+        self.length = torch.tensor([len(r) for r in refs], device=dev)
+        # mirror (y -> -y): legs swapped, hip yaw / roll negated, gravity y negated
+        en = list(asset.joint_names)
+        perm, sign = [], []
+        for n in en:
+            other = ("r_" + n[2:]) if n.startswith("l_") else ("l_" + n[2:])
+            perm.append(en.index(other))
+            sign.append(-1.0 if n.endswith(("hip_yaw", "hip_roll")) else 1.0)
+        self.perm = torch.tensor(perm + [len(en), len(en) + 1, len(en) + 2], device=dev)
+        self.sign = torch.tensor(sign + [1.0, -1.0, 1.0], device=dev)
+        self.nj = len(en)
+        # per library state: reference (0 prone, 1 supine, -1 none) and start frame
+        term = env.event_manager.get_term_cfg(cfg.params.get("event_name", "reset_getup")).func
+        assert isinstance(term, reset_from_getup_states)
+        kinds = term.kinds
+        rid = torch.where(term.prone, 0, 1)
+        off = torch.zeros_like(rid)
+        none = torch.zeros_like(term.prone)
+        for k in ("crouch",):
+            if k in kinds:
+                none |= term.kind == kinds.index(k)
+        p = term.demo_frame >= 0
+        if p.any():
+            demo_t = torch.tensor(demo, device=dev, dtype=torch.long)
+            fr = term.demo_frame.clamp(min=0)
+            d = demo_t[fr]
+            start = torch.tensor([int(f0[0]), int(f1[0])], device=dev)
+            rid = torch.where(p, d, rid)
+            off = torch.where(p, fr - start[d.clamp(0, 1)], off)
+        self.state_ref = torch.where(none, -1, rid)
+        self.state_off = off
+        self.term = term
+
+    def __call__(
+        self,
+        env: ManagerBasedRlEnv,
+        std_q: float = 1.0,
+        std_g: float = 0.5,
+        demo_path: str | None = None,
+        event_name: str = "reset_getup",
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    ) -> torch.Tensor:
+        asset: Entity = env.scene[asset_cfg.name]
+        idx = self.term.index
+        valid = idx >= 0
+        i = idx.clamp(min=0)
+        rid = torch.where(valid, self.state_ref[i], -1)
+        t = self.state_off[i] + env.episode_length_buf - 1
+        active = (rid >= 0) & (t >= 0) & (t < self.length[rid.clamp(min=0)])
+        ref = self.ref[rid.clamp(min=0), t.clamp(min=0, max=self.ref.shape[1] - 1)]
+        ref_m = ref[:, self.perm] * self.sign
+        cur = torch.cat([asset.data.joint_pos, asset.data.projected_gravity_b], dim=1)
+
+        def score(r):
+            eq = torch.sum(torch.square(cur[:, : self.nj] - r[:, : self.nj]), dim=1)
+            eg = torch.sum(torch.square(cur[:, self.nj :] - r[:, self.nj :]), dim=1)
+            return torch.exp(-eq / std_q**2) * torch.exp(-eg / std_g**2)
+
+        r = torch.maximum(score(ref), score(ref_m)) * active.float()
+        env.extras.setdefault("log", {})["Metrics/getup_demo_tracking"] = r.sum() / active.float().sum().clamp(min=1)
+        return torch.nan_to_num(r, nan=0.0)
 
 
 def getup_stand_still(

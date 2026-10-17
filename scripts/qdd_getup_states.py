@@ -301,7 +301,7 @@ def sample_path_states(path: Path, n: int, seed: int, m: mujoco.MjModel):
         d.qpos[:] = q
         mujoco.mj_kinematics(m, d)
         rows.append(
-            (float(q[2]), q[3:7].copy(), q[7:].copy(), _tilt_deg(d), vw[:6].copy(), vw[6:].copy(), float(remain[i]))
+            (float(q[2]), q[3:7].copy(), q[7:].copy(), _tilt_deg(d), vw[:6].copy(), vw[6:].copy(), float(remain[i]), int(i))
         )
     return rows
 
@@ -455,10 +455,11 @@ def main():
     joint_vel = np.array([r[5] for _, r in rows], np.float32)
     remain_s = np.array([r[6] if len(r) > 6 and k == "path" else -1.0 for k, r in rows], np.float32)
     alpha = np.array([r[6] if len(r) > 6 and k.startswith("bridge_") else -1.0 for k, r in rows], np.float32)
+    demo_frame = np.array([r[7] if len(r) > 7 and k == "path" else -1 for k, r in rows], np.int32)
     Path(a.out).parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
         a.out, root_z=z, root_quat=quat, joint_pos=q, tilt_deg=tilt, kind=kind,
-        root_vel=root_vel, joint_vel=joint_vel, remain_s=remain_s, alpha=alpha,
+        root_vel=root_vel, joint_vel=joint_vel, remain_s=remain_s, alpha=alpha, demo_frame=demo_frame,
         kinds=np.array(KINDS), joint_names=np.array(rc.QDD_JOINT_NAMES),
     )
     print(f"{len(rows)} states ({len(res) - sum(r is None for _, r in res)} usable of {len(res)}) -> {a.out}")
