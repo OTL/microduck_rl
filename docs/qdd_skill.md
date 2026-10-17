@@ -191,24 +191,18 @@ yatai は環境変数を渡せないので、跳ぶ技は自分の課題 ID を�
 - mjlab（16 環境、立ち姿勢から 1 回）: 名目どおり／ドメインランダム化ありとも転倒 0。関節の追従誤差 0.8 度（rms）、前傾の誤差 0.3／0.5 度、最大傾き 25／26 度（目標 25 度）。
 - Rust コントローラ（`sim_bridge/sim2sim.sh`、`MODE=walk CMD=0,0,0 DURATION=7.02`、変更なし）: 転倒・故障なし、最大傾き 25.1 度、前傾の誤差 0.6 度、関節の追従誤差 1.0 度、関節範囲まで 18 度以上、膝の上限まで 50 度、トルクは最大でも上限の 40%、最後は前傾 -0.6 度で立ち姿勢、ずれ 3 cm。
 
-### hop4 (2026-10-17): per-episode command lag, bus current < 32 A under DR
+### hop4（2026-10-17）：指令の遅れは試行ごと、ランダム化でもバス < 32 A
 
-- The 33-47 A bus peaks of hop3 under DR came from the actuator command lag being redrawn every
-  2.5 ms physics step (0-10 ms, per actuator group): the table played back and forth in time.
-  `JUMP_LAG_PER_EPISODE` draws it once per episode (range unchanged). Table alone: 38 / 47 A ->
-  22 / 27.8 A (mean / max, 32 envs). `eval_qdd_hop.py --lag-per-step` reproduces the old model.
-- Bus current (reward, termination, eval `bus_a`) uses the env's randomised bus voltage
-  (I = P / V) and motor strength (Kt x s); `bus_a_22` is the old fixed-22 V value. The eval also
-  records the DR draw per env (`dr`).
-- Training ends an episode when the 5 ms average bus current exceeds 32 A (after 0.15 s).
-- run1 (ea90b8e): bus cost 0.05 / 20 A, push residual 0.3. run2 (dd8ae29): foot clearance weight
-  8, flight CoM height 0.5.
+- hop3 のランダム化でのバス 33〜47 A は、指令の遅れ（0〜10 ms）が物理の 1 ステップ（2.5 ms）ごと・関節の組ごとに引き直されていたため（表の再生が時間の前後に跳ぶ）。`JUMP_LAG_PER_EPISODE` で試行ごとに 1 回だけ引く（範囲はそのまま）。表だけで 38 / 47 A → 22 / 27.8 A（平均 / 最大、32 体）。前のモデルは `eval_qdd_hop.py --lag-per-step`。
+- バスの電流（報酬・終了・評価の `bus_a`）は試行の電圧（I = P / V）とモータの強さ（Kt × s）を使う。`bus_a_22` は前の 22 V 固定の値。評価は試行ごとのランダム化の値（`dr`）も出す。
+- 学習では 5 ms 平均のバスが 32 A を超えたら試行を終える（最初の 0.15 s を除く）。
+- run1（ea90b8e）：バスの罰 0.05 / 20 A、押し出しの補正 0.3。run2（dd8ae29）：足の浮きの重み 8、空中の重心の高さ 0.5。
 
-| | table alone | hop3 run1 | hop4 run1 | hop4 run2 |
+| | 表だけ | hop3 run1 | hop4 run1 | hop4 run2 |
 |---|---|---|---|---|
-| falls (nominal 2 / DR 32) | 0 / 0 | 0 / 2 | 0 / 0 | 0 / 0 |
-| foot clearance cm (nominal / DR mean) | 8.5 / 8.1 | 8.0 / 8.1 | 6.8 / 7.4 | 7.8 / 8.1 |
-| landing per foot mg (DR max) | 5.0 | 3.0 | 3.6 | 3.5 |
-| bus A (nominal / DR max) | 21.4 / 27.8 | 24.6 / 90.7 (falls) | 24.2 / 26.6 | 22.5 / 27.7 |
+| 転倒（名目 2 / ランダム化 32） | 0 / 0 | 0 / 2 | 0 / 0 | 0 / 0 |
+| 足の浮き cm（名目 / ランダム化の平均） | 8.5 / 8.1 | 8.0 / 8.1 | 6.8 / 7.4 | 7.8 / 8.1 |
+| 着地 片足 mg（ランダム化の最大） | 5.0 | 3.0 | 3.6 | 3.5 |
+| バス A（名目 / ランダム化の最大） | 21.4 / 27.8 | 24.6 / 90.7（転倒） | 24.2 / 26.6 | 22.5 / 27.7 |
 
-hop4 run2 is in the robot repo's skill library (robot repo docs/jump-feasibility.md 12.).
+hop4 run2 をロボットのリポジトリの技のライブラリに入れた（docs/jump-feasibility.md 12 章）。
