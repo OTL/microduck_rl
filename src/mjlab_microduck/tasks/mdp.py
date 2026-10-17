@@ -8635,6 +8635,10 @@ class SkillReferenceJointPositionAction(_JointAction):
         # motor bus current (analysis/hop.py electrical model), max over the physics substeps of
         # the current policy step (skill_bus_current_cost)
         self.bus_max = torch.zeros(env.num_envs, device=self.device)
+        # ... and of its 5 ms average (2 substeps of 2.5 ms; the LM5069 trips at 32-41 A for 4.7 ms):
+        # skill_bus_overcurrent
+        self.bus5_max = torch.zeros(env.num_envs, device=self.device)
+        self._bus_prev = torch.zeros(env.num_envs, device=self.device)
         self._sub = 0
         self.residual_gain = float(cfg.residual_gain)
         self.zero_residual = bool(cfg.zero_residual)
@@ -8643,6 +8647,7 @@ class SkillReferenceJointPositionAction(_JointAction):
         self._raw_actions[:] = actions
         self._sub = 0
         self.bus_max.zero_()
+        self.bus5_max.zero_()
 
     def _index(self) -> torch.Tensor:
         sk = _qdd_skill(self._env_ref, self.cfg.command_name)
@@ -8651,7 +8656,10 @@ class SkillReferenceJointPositionAction(_JointAction):
 
     def apply_actions(self) -> None:
         # bus current of the physics step just taken (torque applied there, speed after it)
-        self.bus_max = torch.maximum(self.bus_max, qdd_bus_current(self._env_ref, self._entity))
+        i_bus = qdd_bus_current(self._env_ref, self._entity)
+        self.bus_max = torch.maximum(self.bus_max, i_bus)
+        self.bus5_max = torch.maximum(self.bus5_max, 0.5 * (i_bus + self._bus_prev))
+        self._bus_prev = i_bus
         i = self._index()
         res = self.ref_res[i].unsqueeze(1) * self.ref_rsj[i] * (self._scale * self.residual_gain)
         a = torch.zeros_like(self._raw_actions) if self.zero_residual else self._raw_actions
@@ -8700,8 +8708,11 @@ def skill_residual_gain_curriculum(
 def qdd_bus_current(env: ManagerBasedRlEnv, asset: Entity, v_bus: float = 22.0) -> torch.Tensor:
     """[B] motor bus current [A] now: electrical model of the robot repo's analysis/hop.py
     (GIM6010-8: tau w + 1.5 R (tau / Kt)^2, GIM3510-8: tau w / 0.7 motoring, x 0.7
-    braking; / v_bus) on the applied joint torques and speeds."""
-    from mjlab_microduck.actuator.qdd_motor import KT_6010, R_PH_6010
+    braking; / v_bus) on the applied joint torques and speeds. With envelope actuators
+    (QddMotorActuator) the env's randomised bus voltage and strength are used: I = P / V
+    and Kt x strength (a weaker motor draws more current for the same torque); v_bus is
+    the fallback."""
+    from mjlab_microduck.actuator.qdd_motor import KT_6010, R_PH_6010, QddMotorActuator
 
     cache = env.__dict__.setdefault("_qdd_ankle_mask", {})
     if id(asset) not in cache:
@@ -8711,10 +8722,13 @@ def qdd_bus_current(env: ManagerBasedRlEnv, asset: Entity, v_bus: float = 22.0) 
     ankle = cache[id(asset)]
     tau = asset.data.qfrc_actuator
     w = asset.data.joint_vel
-    p6010 = tau * w + 1.5 * R_PH_6010 * torch.square(tau / KT_6010)
+    act = next((a for a in asset.actuators if isinstance(a, QddMotorActuator) and a.v_bus is not None), None)
+    v = act.v_bus[:, 0] if act is not None else v_bus
+    kt = KT_6010 * act.strength if act is not None else KT_6010
+    p6010 = tau * w + 1.5 * R_PH_6010 * torch.square(tau / kt)
     pm = tau * w
     pank = torch.where(pm > 0, pm / 0.7, pm * 0.7)
-    return torch.nan_to_num(torch.where(ankle, pank, p6010).sum(dim=1) / v_bus)
+    return torch.nan_to_num(torch.where(ankle, pank, p6010).sum(dim=1) / v)
 
 
 def skill_bus_current_cost(
@@ -8736,6 +8750,24 @@ def skill_bus_current_cost(
         i_bus = torch.maximum(i_bus, term.bus_max)
     env.extras["log"]["Metrics/hop_bus_a_max"] = i_bus.max()
     return torch.nan_to_num(torch.square(torch.clamp(i_bus - threshold_a, min=0.0)), nan=0.0)
+
+
+def skill_bus_overcurrent(
+    env: ManagerBasedRlEnv,
+    limit_a: float = 32.0,
+    skip_s: float = 0.15,
+    action_name: str = "joint_pos",
+) -> torch.Tensor:
+    """TERMINATION: the 5 ms average motor bus current (qdd_bus_current, largest over the
+    physics substeps of this policy step; SkillReferenceJointPositionAction only) exceeds
+    limit_a (LM5069 hot-swap: trips at 32-41 A for 4.7 ms -> the robot loses power). Not in
+    the first skip_s of an episode: the spawn (dropped from a few mm, or a reference state
+    with its speeds) draws 40-100 A for a step, which the robot never sees."""
+    term = env.action_manager.get_term(action_name)
+    if not isinstance(term, SkillReferenceJointPositionAction):
+        return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    settled = env.episode_length_buf * env.step_dt >= skip_s
+    return settled & (torch.nan_to_num(term.bus5_max) > limit_a)
 
 
 def skill_foot_clearance(

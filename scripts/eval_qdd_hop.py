@@ -13,8 +13,10 @@ One skill execution per env from the standing pose (no RSI). Per env:
   - joint peak speed / torque, and the peak use of the torque-speed envelope
     (|tau| / available torque at that speed while motoring)
   - motor bus current: electrical model of the robot repo's analysis/hop.py
-    (GIM6010-8: tau w + 1.5 R (tau / Kt)^2, GIM3510-8: tau w / 0.7; / 22 V), peak of the
-    5 ms average
+    (GIM6010-8: tau w + 1.5 R (tau / (s Kt))^2, GIM3510-8: tau w / 0.7; / V), peak of the
+    5 ms average, with the env's randomised bus voltage V and motor strength s (bus_a; the
+    earlier fixed 22 V / s = 1 value is bus_a_22)
+  - the env's domain randomisation draw (dr: bus voltage, strength, Kp scales, torso CoM)
   - falls (termination before the end), torso pitch change in flight, final pose error
     (max |q - standing| and torso tilt one step before the end)
 """
@@ -58,7 +60,8 @@ def run(onnx_path: str, play: bool, n_envs: int, seed: int = 0) -> dict:
     nj = len(robot.joint_names)
     B = n_envs
 
-    sub = dict(w=[], tau=[], util=[], bus=[], sole=[])
+    sub = dict(w=[], tau=[], util=[], bus=[], bus22=[], sole=[])
+    env_vs = {}
     orig_step = env.sim.step
 
     def step_hook():
@@ -76,14 +79,34 @@ def run(onnx_path: str, play: bool, n_envs: int, seed: int = 0) -> dict:
         motoring = tau * w > 0
         util = torch.where(motoring, tau.abs() / lim.clamp(min=1e-3), torch.zeros_like(tau))
         sub["util"].append(util)
-        p6010 = tau * w + 1.5 * R_PH_6010 * (tau / KT_6010) ** 2
         pank = torch.where(tau * w > 0, tau * w / 0.7, tau * w * 0.7)
-        p = torch.where(ankle, pank, p6010).sum(dim=1)
-        sub["bus"].append(p / V_BUS)
+        p22 = torch.where(ankle, pank, tau * w + 1.5 * R_PH_6010 * (tau / KT_6010) ** 2).sum(dim=1)
+        sub["bus22"].append(p22 / V_BUS)
+        if env_vs:
+            kt = KT_6010 * env_vs["strength"][:, None]
+            p = torch.where(ankle, pank, tau * w + 1.5 * R_PH_6010 * (tau / kt) ** 2).sum(dim=1)
+            sub["bus"].append(p / env_vs["v_bus"])
+        else:
+            sub["bus"].append(p22 / V_BUS)
         sub["sole"].append(microduck_mdp.sole_lowest_z(robot, sites, FOOT_HALF_LENGTH_M, FOOT_HALF_WIDTH_M))
 
     env.sim.step = step_hook
     obs, _ = env.reset()
+    from mjlab_microduck.actuator.qdd_motor import QddMotorActuator
+    dr = {}
+    for a in robot.actuators:
+        if isinstance(a, QddMotorActuator) and a.v_bus is not None:
+            env_vs.update(v_bus=a.v_bus[:, 0].clone(), strength=a.strength[:, 0].clone())
+        for j, nm in enumerate(a._target_names):
+            if nm.endswith(("hip_pitch", "knee", "ankle_pitch")):
+                dr["kp_" + nm] = (a.stiffness[:, j] / a.default_stiffness[:, j]).clone()
+    dr.update(env_vs)
+    try:
+        tid = robot.indexing.body_ids[0]
+        dr["torso_com_x"] = (env.sim.model.body_ipos[:, tid, 0] - env.sim.get_default_field("body_ipos")[tid, 0]).clone()
+        dr["torso_com_z"] = (env.sim.model.body_ipos[:, tid, 2] - env.sim.get_default_field("body_ipos")[tid, 2]).clone()
+    except Exception:  # noqa: BLE001  (diagnostic only)
+        pass
     n = sk.n
     com_stand = None
     rec = {k: [] for k in ("com_z", "com_vz", "air", "fz", "sole_z", "pitch")}
@@ -123,6 +146,8 @@ def run(onnx_path: str, play: bool, n_envs: int, seed: int = 0) -> dict:
     pitch = torch.stack(rec["pitch"], 1)
     skip = round(SETTLE_SKIP_S / dt_sub)  # spawn transient (dropped from 5-10 mm, PD settling)
     bus = torch.stack(sub["bus"], 1)  # [B, n*H]
+    bus22 = torch.stack(sub["bus22"], 1)
+    bus22[:, :skip] = 0.0
     sole_sub = torch.stack(sub["sole"], 1)  # [B, n*H] lowest sole point (both feet)
     bus[:, :skip] = 0.0
     for key in ("w", "tau", "util"):
@@ -131,6 +156,7 @@ def run(onnx_path: str, play: bool, n_envs: int, seed: int = 0) -> dict:
     kern = torch.ones(1, 1, nav) / nav
     fz5 = torch.nn.functional.conv1d(fz.reshape(-1, 1, fz.shape[-1]), kern).reshape(B, 2, -1)
     bus5 = torch.nn.functional.conv1d(bus.reshape(B, 1, -1), kern).reshape(B, -1)
+    bus5_22 = torch.nn.functional.conv1d(bus22.reshape(B, 1, -1), kern).reshape(B, -1)
     out = []
     for b in range(B):
         air = (fz[b].sum(0) < 1e-4).numpy()  # substeps with both soles off
@@ -167,6 +193,8 @@ def run(onnx_path: str, play: bool, n_envs: int, seed: int = 0) -> dict:
         r["takeoff_vz"] = float(com_vz[b].max())
         r["peak_foot_mg"] = float(fz5[b].max())
         r["bus_a"] = float(bus5[b].max())
+        r["bus_a_22"] = float(bus5_22[b].max())
+        r["dr"] = {k: round(float(v[b]), 4) for k, v in dr.items()}
         r["t_bus_peak"] = float(bus5[b].argmax()) * dt_sub  # s since the skill started (5 ms window start)
         if flights:
             r["t_bus_peak_rel_takeoff"] = r["t_bus_peak"] - r["t_takeoff"]
@@ -209,6 +237,8 @@ def summarise(res: dict) -> dict:
             max=round(float(np.max([max(r["land_mg_l"], r["land_mg_r"]) for r in hop])), 2)),
         first_touch={k: sum(r.get("first_touch") == k for r in hop) for k in ("both", "l", "r")},
         bus_a=stat("bus_a", e),
+        bus_a_22=stat("bus_a_22", e),
+        bus_over_32a=sum(r["bus_a"] >= 32.0 for r in e),
         max_envelope_use=stat("max_util", e),
         joint_peak_speed={n: round(float(x), 1) for n, x in zip(jn, w)},
         joint_peak_torque={n: round(float(x), 2) for n, x in zip(jn, tau)},
@@ -223,7 +253,12 @@ def main():
     ap.add_argument("--envs", type=int, default=32)
     ap.add_argument("--json")
     ap.add_argument("--nominal-only", action="store_true")
+    ap.add_argument("--lag-per-step", action="store_true",
+                    help="redraw the command lag every physics step (before 2026-10-17)")
     a = ap.parse_args()
+    if a.lag_per_step:
+        from mjlab_microduck.tasks import qdd_biped_skill_env_cfg as C
+        C.JUMP_LAG_PER_EPISODE = False
     out = {}
     for play, n in ((True, 2), (False, a.envs))[: 1 if a.nominal_only else 2]:
         res = run(a.onnx, play, n)

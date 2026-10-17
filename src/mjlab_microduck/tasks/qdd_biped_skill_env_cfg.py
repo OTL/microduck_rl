@@ -104,6 +104,13 @@ JUMP_TASK_ID = "Mjlab-Skill-Hop-QddBiped"
 JUMP_SPEC = "hop"  # skills/hop.json (yatai cannot pass $QDD_SKILL_SPEC: own task id)
 JUMP_PHYSICS_DT = 0.0025  # s (explicit PD of the ankle is not stable at 5 ms)
 JUMP_ACTUATOR_MAX_LAG_S = 0.01  # command latency 0-10 ms (as walking)
+# The lag is drawn once per episode (per actuator group), not every physics substep: the
+# controller plays the table back in its own 500 Hz SCHED_FIFO loop, so the command
+# latency is roughly constant (one CAN round). A lag redrawn every 2.5 ms moved the table
+# back and forth by up to 10 ms (16 rad/s x 10 ms = 0.16 rad -> 6 Nm of PD torque): with it
+# the table alone drew 38 A mean / 47 A max under DR (22 V model), with a per-episode lag 21 / 23.5 A
+# (22 / 27.8 A with the env voltage and strength in the current model).
+JUMP_LAG_PER_EPISODE = True
 JUMP_PLAY_LAG_S = 0.005
 FLIGHT_HEIGHT_STD = 0.015  # m, CoM height tracking in the push-off + flight window
 FLIGHT_VZ_STD = 0.3  # m/s, CoM vertical speed tracking in the same window
@@ -126,10 +133,13 @@ REF_RSI_FOCUS_FRACTION = 0.7  # ... and of those, in the crouch just before the 
 REF_RSI_FOCUS_LEAD_S = 0.5  # focus window = [push start - this, push start - 0.02 s]
 REF_TERMINATION_WEIGHT = -50.0  # x dt (10 ms) = -0.5 per fall
 REF_RESIDUAL_WEIGHT = 0.05  # |a|^2 cost
-REF_BUS_THRESHOLD_A = 18.0  # bus current cost above this (LM5069 trips at 32-41 A)
-# x relu(I - 18 A)^2, I = largest over the physics substeps of the step. hop3 run1 with 0.05 / 20 A:
-# 33 A mean / 40 A max under domain randomisation (push-off); run2: 0.25 / 18 A
-REF_BUS_WEIGHT = 0.25
+REF_BUS_THRESHOLD_A = 20.0  # bus current cost above this (LM5069 trips at 32-41 A)
+# x relu(I - 20 A)^2, I = largest over the physics substeps of the step. hop3 run1 with 0.05 / 20 A:
+# 33 A mean / 40 A max under domain randomisation (push-off; with the lag redrawn every substep,
+# see JUMP_LAG_PER_EPISODE); run2: 0.25 / 18 A did not lower it and weakened the hop. hop4: 0.05 /
+# 20 A again, plus the termination below
+REF_BUS_WEIGHT = 0.05
+REF_BUS_TERMINATE_A = 32.0  # training episodes end when the 5 ms average bus current exceeds this
 FOOT_CLEARANCE_CAP = 1.25  # foot clearance reward saturates at 1.25 x the table's plan
 REF_RESIDUAL_GAIN_START = 0.5
 REF_RESIDUAL_RAMP_ITERS = 300
@@ -292,6 +302,10 @@ def _make_reference_action(cfg: ManagerBasedRlEnvCfg, spec: dict, play: bool) ->
     r["bus_current"] = RewardTermCfg(
         func=microduck_mdp.skill_bus_current_cost, weight=-REF_BUS_WEIGHT, params={"threshold_a": REF_BUS_THRESHOLD_A}
     )
+    if not play and REF_BUS_TERMINATE_A:
+        cfg.terminations["bus_overcurrent"] = TerminationTermCfg(
+            func=microduck_mdp.skill_bus_overcurrent, params={"limit_a": REF_BUS_TERMINATE_A}
+        )
     clear = spec["_table"]["meta"].get("foot_clear_m")
     w = spec["reward_weights"].get("foot_clearance", 0.0)
     if clear and w > 0:
@@ -336,6 +350,8 @@ def _make_jump_physics(cfg: ManagerBasedRlEnvCfg, spec: dict, play: bool) -> Non
     robot = cfg.scene.entities["robot"]
     lag = int(round(JUMP_ACTUATOR_MAX_LAG_S / dt))
     acts = qdd_envelope_actuators(delay_max_lag=lag)
+    if JUMP_LAG_PER_EPISODE:
+        acts = tuple(dc_replace(a, delay_update_period=10**9, delay_per_env_phase=False) for a in acts)
     if play:
         pl = int(round(JUMP_PLAY_LAG_S / dt))
         acts = tuple(dc_replace(a, delay_min_lag=pl, delay_max_lag=pl) for a in acts)

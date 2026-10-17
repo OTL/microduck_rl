@@ -400,15 +400,19 @@ def test_bus_current_is_the_largest_over_the_substeps(hop_env):
 
     env.sim.step = hook
     try:
+        env.step(torch.zeros(4, 10))
         env.step(torch.full((4, 10), 0.5))
     finally:
         env.sim.step = orig
-    assert len(seen) == env.cfg.decimation
-    # the action term saw substeps 1..3 (it samples before each physics step); the cost adds the last
-    want = torch.stack(seen[:-1], 1).amax(1)
+    n = env.cfg.decimation
+    assert len(seen) == 2 * n
+    # the action term samples before each physics step: the last substep of the previous policy
+    # step and substeps 1..3 of this one; the cost adds the last
+    want = torch.stack(seen[n - 1 : -1], 1).amax(1)
+    seen = seen[n:]
     assert torch.allclose(term.bus_max, want, atol=1e-4)
     cost = microduck_mdp.skill_bus_current_cost(env, 0.0)
-    assert torch.allclose(cost, torch.stack(seen, 1).amax(1).clamp(min=0.0) ** 2, rtol=1e-4, atol=1e-4)
+    assert torch.allclose(cost, torch.maximum(want, seen[-1]).clamp(min=0.0) ** 2, rtol=1e-4, atol=1e-4)
 
 
 # --- policy_io / cfg ----------------------------------------------------------------------
