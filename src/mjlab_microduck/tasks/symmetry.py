@@ -227,6 +227,10 @@ def qdd_biped_symmetry(env, obs: TensorDict | None, actions: torch.Tensor | None
     if obs is not None:
         actor = obs["actor"]
         obs_perm, obs_sign, _, _ = _qdd_tensors(actor.device)
+        # The get-up policy (Mjlab-Getup-QddBiped) uses the first 36 entries
+        # (no command / gait phase): the table maps them onto themselves.
+        dim = actor.shape[1]
+        obs_perm, obs_sign = obs_perm[:dim], obs_sign[:dim]
         critic = obs["critic"]
         aug_obs = TensorDict(
             {

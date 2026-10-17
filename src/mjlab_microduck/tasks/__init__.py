@@ -6,6 +6,8 @@ from mjlab_microduck.train_hook import maybe_submit_to_hf_jobs
 # train_hook.py). A no-op without the flag.
 maybe_submit_to_hf_jobs()
 
+from dataclasses import replace
+
 from mjlab.tasks.registry import register_mjlab_task
 from mjlab.tasks.velocity.rl import VelocityOnPolicyRunner
 
@@ -310,4 +312,54 @@ register_mjlab_task(
     play_env_cfg=make_qdd_biped_velocity_env_cfg(play=True),
     rl_cfg=QddBipedRlCfg,
     runner_cls=QddBipedOnPolicyRunner,
+)
+
+
+# QDD biped on rough terrain: same actor obs / policy_io as the flat task (the
+# controller swaps the walking ONNX only), terrain curriculum.
+from .qdd_biped_rough_env_cfg import make_qdd_biped_rough_env_cfg
+
+register_mjlab_task(
+    task_id="Mjlab-Velocity-Rough-QddBiped",
+    env_cfg=make_qdd_biped_rough_env_cfg(),
+    play_env_cfg=make_qdd_biped_rough_env_cfg(play=True),
+    rl_cfg=replace(
+        QddBipedRlCfg,
+        experiment_name="qdd_biped_rough",
+        run_name="qdd_biped_rough",
+        max_iterations=3_000,
+    ),
+    runner_cls=QddBipedOnPolicyRunner,
+)
+
+
+# QDD biped get-up after a fall: own policy_io (kind "getup", 36-D actor).
+from .qdd_biped_getup_env_cfg import (
+    getup_policy_io_onnx_metadata as _qdd_getup_policy_io_onnx_metadata,
+    make_qdd_biped_getup_env_cfg,
+    QddBipedGetupRlCfg,
+)
+
+
+class QddBipedGetupOnPolicyRunner(MicroduckOnPolicyRunner):
+    """Attaches robot/qdd_biped/policy_io_getup.json to every checkpoint ONNX."""
+
+    def save(self, path: str, infos=None):
+        super().save(path, infos)
+        _, _, onnx_path = self._get_export_paths(path)
+        try:
+            from mjlab.rl.exporter_utils import attach_metadata_to_onnx
+
+            if onnx_path.exists():
+                attach_metadata_to_onnx(str(onnx_path), _qdd_getup_policy_io_onnx_metadata())
+        except Exception as e:  # never kill training over metadata
+            print(f"[qdd_getup] policy_io metadata not attached: {e}")
+
+
+register_mjlab_task(
+    task_id="Mjlab-Getup-QddBiped",
+    env_cfg=make_qdd_biped_getup_env_cfg(),
+    play_env_cfg=make_qdd_biped_getup_env_cfg(play=True),
+    rl_cfg=QddBipedGetupRlCfg,
+    runner_cls=QddBipedGetupOnPolicyRunner,
 )

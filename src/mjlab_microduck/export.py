@@ -264,11 +264,16 @@ def run_export(task_id: str, cfg: ExportConfig) -> ExportResult:
     runner.export_policy_to_onnx(path, filename)
 
     metadata = get_base_metadata(runner.env.unwrapped, run_path=cfg.checkpoint_file)
-    if task_id == "Mjlab-Velocity-Flat-QddBiped":
+    if task_id in ("Mjlab-Velocity-Flat-QddBiped", "Mjlab-Velocity-Rough-QddBiped"):
         # Real-robot I/O contract (robot/qdd_biped/policy_io.json) + its sha256.
+        # The rough-terrain policy has the same contract (same actor obs).
         from mjlab_microduck.tasks.qdd_biped_velocity_env_cfg import policy_io_onnx_metadata
 
         metadata.update(policy_io_onnx_metadata())
+    elif task_id == "Mjlab-Getup-QddBiped":
+        from mjlab_microduck.tasks.qdd_biped_getup_env_cfg import getup_policy_io_onnx_metadata
+
+        metadata.update(getup_policy_io_onnx_metadata())
     attach_metadata_to_onnx(onnx_path, metadata)
 
     print(f"Written {onnx_path}")

@@ -7860,17 +7860,36 @@ def gait_contact_schedule(
     return match.mean(dim=1)
 
 
+def qdd_sole_height(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg,
+    height_sensor_name: str | None = None,
+    height_offset: float = 0.0,
+) -> torch.Tensor:
+    """Sole height [B, F] of the foot sites in ``asset_cfg``: world z (flat
+    ground at z = 0), or, with ``height_sensor_name``, the clearance above the
+    terrain under each foot from a TerrainHeightSensor whose frames sit
+    ``height_offset`` above the soles (rough terrain: steps, slopes, bumps)."""
+    if height_sensor_name is not None:
+        return env.scene[height_sensor_name].data.heights - height_offset
+    asset: Entity = env.scene[asset_cfg.name]
+    return asset.data.site_pos_w[:, asset_cfg.site_ids, 2]
+
+
 def gait_foot_height_tracking(
     env: ManagerBasedRlEnv,
     swing_height: float,
     std: float,
     command_name: str = "gait",
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    height_sensor_name: str | None = None,
+    height_offset: float = 0.0,
 ) -> torch.Tensor:
-    """REWARD in [0, 1]: sole height (foot site z, flat ground) tracks
-    h_ref = swing_height * sin(pi * swing_progress) in swing and 0 in stance."""
-    asset: Entity = env.scene[asset_cfg.name]
-    h = asset.data.site_pos_w[:, asset_cfg.site_ids, 2]  # [B, 2]
+    """REWARD in [0, 1]: sole height tracks h_ref = swing_height *
+    sin(pi * swing_progress) in swing and 0 in stance. Sole height = foot site z
+    (flat ground), or the clearance above the terrain under the foot when
+    ``height_sensor_name`` names a TerrainHeightSensor on the foot sites (rough)."""
+    h = qdd_sole_height(env, asset_cfg, height_sensor_name, height_offset)  # [B, 2]
     swing, progress, _ = qdd_gait_schedule(env, command_name)
     h_ref = torch.where(swing, swing_height * torch.sin(math.pi * progress), torch.zeros_like(h))
     err = torch.square(torch.clamp(h, min=0.0) - h_ref)
@@ -7884,14 +7903,16 @@ def gait_swing_clearance_deficit(
     min_height: float,
     command_name: str = "gait",
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    height_sensor_name: str | None = None,
+    height_offset: float = 0.0,
 ) -> torch.Tensor:
     """COST (>= 0, m): how far each swing foot is BELOW the minimum clearance
     profile min_height * sin(pi * swing_progress), summed over feet. One-sided
     (a higher swing is free; gait_swing_height shapes the apex): stops the
     shuffling gait (gait2 swung 0.6 cm on average for a 5 cm target), where the
-    Gaussian tracking kernel alone gives little gradient."""
-    asset: Entity = env.scene[asset_cfg.name]
-    h = asset.data.site_pos_w[:, asset_cfg.site_ids, 2]  # [B, 2]
+    Gaussian tracking kernel alone gives little gradient. Height as in
+    gait_foot_height_tracking (terrain clearance with ``height_sensor_name``)."""
+    h = qdd_sole_height(env, asset_cfg, height_sensor_name, height_offset)  # [B, 2]
     swing, progress, _ = qdd_gait_schedule(env, command_name)
     h_min = min_height * torch.sin(math.pi * progress)
     deficit = torch.clamp(h_min - h, min=0.0) * swing.float()
@@ -8017,6 +8038,8 @@ def feet_tilt_near_ground(
     sensor_name: str,
     height_threshold: float = 0.02,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    height_sensor_name: str | None = None,
+    height_offset: float = 0.0,
 ) -> torch.Tensor:
     """COST (>= 0): sole tilt (|xy of gravity in the foot frame|^2) for feet in
     contact or within ``height_threshold`` of the ground -> flat touchdown and
@@ -8031,7 +8054,7 @@ def feet_tilt_near_ground(
     n = quats.shape[1]
     proj = quat_apply_inverse(quats.reshape(-1, 4), g.repeat_interleave(n, dim=0)).reshape(-1, n, 3)
     tilt = torch.sum(torch.square(proj[..., :2]), dim=-1)  # [B, 2]
-    h = asset.data.site_pos_w[:, asset_cfg.site_ids, 2]
+    h = qdd_sole_height(env, asset_cfg, height_sensor_name, height_offset)
     assert sensor.data.found is not None
     near = (sensor.data.found > 0) | (h < height_threshold)
     return torch.nan_to_num((tilt * near.float()).sum(dim=1), nan=0.0)
@@ -8172,3 +8195,243 @@ def track_lin_vel_xy_exp(
     command = env.command_manager.get_command(command_name)
     err = torch.sum(torch.square(command[:, :2] - asset.data.root_link_lin_vel_b[:, :2]), dim=1)
     return torch.nan_to_num(torch.exp(-err / std**2), nan=0.0)
+
+
+# =============================================================================
+# QDD biped get-up (Mjlab-Getup-QddBiped, tasks/qdd_biped_getup_env_cfg.py)
+# =============================================================================
+
+
+class reset_from_getup_states:
+    """RESET event: start lying on the floor in a resting pose from the fallen-
+    state library (scripts/qdd_getup_states.py: falls the real controller
+    produces, simulated to rest in plain MuJoCo), with a random yaw, at the env
+    origin, at rest. ``standing_prob`` of the resets start standing in the
+    default pose instead (the policy must also just keep standing, and a
+    hand-over to walking starts from there). ``kind_probs`` weighs the library
+    kinds ("push", "stride", "drop"); None = as stored."""
+
+    def __init__(self, cfg, env: ManagerBasedRlEnv):
+        path = cfg.params["states_path"]
+        data = np.load(path)
+        names = [str(n) for n in data["joint_names"]]
+        asset: Entity = env.scene[cfg.params.get("asset_cfg", _DEFAULT_ASSET_CFG).name]
+        # library joint order -> entity joint order
+        order = [names.index(n) for n in asset.joint_names]
+        dev = env.device
+        self.root_z = torch.tensor(data["root_z"], dtype=torch.float32, device=dev)
+        self.root_quat = torch.tensor(data["root_quat"], dtype=torch.float32, device=dev)
+        self.joint_pos = torch.tensor(data["joint_pos"][:, order], dtype=torch.float32, device=dev)
+        self.kind = torch.tensor(data["kind"], dtype=torch.long, device=dev)
+        self.kinds = [str(k) for k in data["kinds"]]
+        self.n = self.root_z.shape[0]
+        # last sampled library index per env (-1 = standing start); for metrics/tests
+        self.index = torch.full((env.num_envs,), -1, dtype=torch.long, device=dev)
+
+    def _sample(self, num: int, kind_probs, device) -> torch.Tensor:
+        if kind_probs is None:
+            return torch.randint(0, self.n, (num,), device=device)
+        w = torch.zeros(self.n, device=device)
+        for k, p in kind_probs.items():
+            w[self.kind == self.kinds.index(k)] = float(p)
+        return torch.multinomial(w, num, replacement=True)
+
+    def __call__(
+        self,
+        env: ManagerBasedRlEnv,
+        env_ids: torch.Tensor | None,
+        states_path: str,
+        standing_prob: float = 0.1,
+        kind_probs: dict | None = None,
+        fixed_order: bool = False,
+        z_lift: float = 0.003,
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    ) -> None:
+        if env_ids is None:
+            env_ids = torch.arange(env.num_envs, device=env.device)
+        env_ids = env_ids.to(env.device, dtype=torch.long)
+        num = len(env_ids)
+        if num == 0:
+            return
+        asset: Entity = env.scene[asset_cfg.name]
+        dev = env.device
+        if fixed_order:  # play / video: env i always gets state i (no standing starts)
+            idx = env_ids % self.n
+            standing = torch.zeros(num, dtype=torch.bool, device=dev)
+        else:
+            idx = self._sample(num, kind_probs, dev)
+            standing = torch.rand(num, device=dev) < standing_prob
+        self.index[env_ids] = torch.where(standing, -1, idx)
+
+        yaw = (torch.rand(num, device=dev) * 2 - 1) * math.pi
+        q_yaw = torch.stack(
+            [torch.cos(yaw / 2), torch.zeros_like(yaw), torch.zeros_like(yaw), torch.sin(yaw / 2)], dim=1
+        )
+        quat = _quat_mul_wxyz(q_yaw, self.root_quat[idx])
+        z = self.root_z[idx] + z_lift
+        joint_pos = self.joint_pos[idx].clone()
+
+        default_q = asset.data.default_joint_pos[env_ids]
+        stand_z = asset.data.default_root_state[env_ids, 2]
+        quat = torch.where(standing.unsqueeze(1), q_yaw, quat)
+        z = torch.where(standing, stand_z, z)
+        joint_pos = torch.where(standing.unsqueeze(1), default_q, joint_pos)
+
+        root = torch.zeros(num, 13, device=dev)
+        root[:, :3] = env.scene.env_origins[env_ids]
+        root[:, 2] += z
+        root[:, 3:7] = quat
+        asset.write_root_state_to_sim(root, env_ids=env_ids)
+        asset.write_joint_state_to_sim(joint_pos, torch.zeros_like(joint_pos), env_ids=env_ids)
+
+
+def _quat_mul_wxyz(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    w1, x1, y1, z1 = a.unbind(-1)
+    w2, x2, y2, z2 = b.unbind(-1)
+    return torch.stack(
+        [
+            w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+            w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+            w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+            w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+        ],
+        dim=-1,
+    )
+
+
+def qdd_torso_up(env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG) -> torch.Tensor:
+    """cos(tilt) of the torso: 1 upright, 0 on its side / front / back, -1 upside down."""
+    asset: Entity = env.scene[asset_cfg.name]
+    return -asset.data.projected_gravity_b[:, 2]
+
+
+def qdd_root_height(env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG) -> torch.Tensor:
+    """Torso origin height above the env origin (flat floor) [B]."""
+    asset: Entity = env.scene[asset_cfg.name]
+    return asset.data.root_link_pos_w[:, 2] - env.scene.env_origins[:, 2]
+
+
+def qdd_root_height_obs(env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG) -> torch.Tensor:
+    """CRITIC obs [B, 1]: torso origin height above the floor (privileged)."""
+    return torch.nan_to_num(qdd_root_height(env, asset_cfg).unsqueeze(1), nan=0.0)
+
+
+def _getup_standing_score(
+    env: ManagerBasedRlEnv, stand_z: float, up_scale: float, z_std: float, sensor_name: str
+) -> torch.Tensor:
+    from mjlab.sensor import ContactSensor
+
+    up = qdd_torso_up(env)
+    up_g = torch.exp(-torch.clamp(1.0 - up, min=0.0) / up_scale)
+    z = qdd_root_height(env)
+    z_g = torch.exp(-torch.square((z - stand_z) / z_std))
+    sensor: ContactSensor = env.scene[sensor_name]
+    assert sensor.data.found is not None
+    feet = (sensor.data.found > 0).float().mean(dim=1)
+    return up_g * z_g * (0.5 + 0.5 * feet)
+
+
+def getup_standing(
+    env: ManagerBasedRlEnv,
+    stand_z: float,
+    sensor_name: str,
+    up_scale: float = 0.05,
+    z_std: float = 0.06,
+) -> torch.Tensor:
+    """REWARD in [0, 1]: standing = upright (exp(-(1 - cos tilt) / up_scale):
+    10 deg -> 0.74, 20 deg -> 0.30) x torso height near the standing height
+    (Gaussian, z_std) x feet down (0.5 + 0.5 x share of soles in contact). A
+    product: lying, kneeling or a tilted crouch each collapse it."""
+    r = _getup_standing_score(env, stand_z, up_scale, z_std, sensor_name)
+    env.extras["log"]["Metrics/getup_standing"] = r.mean()
+    env.extras["log"]["Metrics/getup_stood_frac"] = (r > 0.5).float().mean()
+    return torch.nan_to_num(r, nan=0.0)
+
+
+def getup_stand_still(
+    env: ManagerBasedRlEnv,
+    stand_z: float,
+    sensor_name: str,
+    lin_std: float = 0.1,
+    ang_std: float = 0.5,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """REWARD in [0, 1]: once standing (getup_standing > 0.5), a still torso
+    (Gaussians on |v_xy| and |omega|). Zero while not standing (never pays for a
+    bad state)."""
+    asset: Entity = env.scene[asset_cfg.name]
+    stood = _getup_standing_score(env, stand_z, 0.05, 0.06, sensor_name) > 0.5
+    v = torch.sum(torch.square(asset.data.root_link_lin_vel_w[:, :2]), dim=1)
+    w = torch.sum(torch.square(asset.data.root_link_ang_vel_b), dim=1)
+    r = torch.exp(-v / lin_std**2) * torch.exp(-w / ang_std**2)
+    return torch.nan_to_num(r * stood.float(), nan=0.0)
+
+
+def getup_stand_pose(
+    env: ManagerBasedRlEnv,
+    stand_z: float,
+    sensor_name: str,
+    std: float = 0.25,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """REWARD in [0, 1]: once standing, the joints near the default (walking
+    start) pose: exp(-sum (q - q0)^2 / std^2). The hand-over to the walking
+    policy starts from there."""
+    asset: Entity = env.scene[asset_cfg.name]
+    stood = _getup_standing_score(env, stand_z, 0.05, 0.06, sensor_name) > 0.5
+    err = torch.sum(torch.square(asset.data.joint_pos - asset.data.default_joint_pos), dim=1)
+    return torch.nan_to_num(torch.exp(-err / std**2) * stood.float(), nan=0.0)
+
+
+class getup_progress:
+    """REWARD (potential-based shaping): Phi(t) - Phi(t-1) with Phi = uprightness
+    ((1 + cos tilt) / 2) + torso height (0 at ``z_low``, 1 at ``stand_z``).
+    Rising pays, holding pays nothing, falling back costs what rising paid:
+    unfarmable, and it gives the long get-up a gradient from the first move.
+    The first step after a reset pays 0."""
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+        self.prev = torch.zeros(env.num_envs, device=env.device)
+        self.fresh = torch.ones(env.num_envs, dtype=torch.bool, device=env.device)
+
+    def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
+        if env_ids is None:
+            env_ids = slice(None)
+        self.fresh[env_ids] = True
+
+    def __call__(
+        self, env: ManagerBasedRlEnv, stand_z: float, z_low: float = 0.05, height_weight: float = 1.0
+    ) -> torch.Tensor:
+        up = (1.0 + qdd_torso_up(env)) / 2.0
+        h = torch.clamp((qdd_root_height(env) - z_low) / (stand_z - z_low), 0.0, 1.0)
+        phi = torch.nan_to_num(up + height_weight * h, nan=0.0)
+        r = torch.where(self.fresh, torch.zeros_like(phi), phi - self.prev)
+        self.prev = phi
+        self.fresh[:] = False
+        return r
+
+
+def torso_ang_vel_excess(
+    env: ManagerBasedRlEnv, limit: float, asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG
+) -> torch.Tensor:
+    """COST (>= 0): (|omega| - limit)^2 of the torso above ``limit`` rad/s: no
+    flinging / tumbling (the IMU gyro range and the hardware take the rest)."""
+    asset: Entity = env.scene[asset_cfg.name]
+    w = torch.linalg.norm(asset.data.root_link_ang_vel_b, dim=1)
+    return torch.nan_to_num(torch.square(torch.clamp(w - limit, min=0.0)), nan=0.0)
+
+
+def body_impact_cost(env: ManagerBasedRlEnv, sensor_name: str, threshold: float) -> torch.Tensor:
+    """COST (>= 0): sum over the non-sole parts touching the floor of
+    (|F| - threshold) / threshold, peak over the substeps of this policy step
+    (needs a ContactSensor with fields ("found", "force"), reduce "netforce",
+    history_length = decimation). Slamming the torso / knees down to get up
+    costs; lying, kneeling and pushing with them does not."""
+    from mjlab.sensor import ContactSensor
+
+    sensor: ContactSensor = env.scene[sensor_name]
+    f = sensor.data.force_history if sensor.data.force_history is not None else sensor.data.force.unsqueeze(2)
+    mag = torch.linalg.norm(f, dim=-1).amax(dim=2)  # [B, N]
+    cost = torch.clamp(mag - threshold, min=0.0) / threshold
+    env.extras["log"]["Metrics/body_impact_peak_n"] = torch.nan_to_num(mag.amax(dim=1), nan=0.0).mean()
+    return torch.nan_to_num(cost.sum(dim=1), nan=0.0)

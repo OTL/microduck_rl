@@ -1,0 +1,215 @@
+{
+  "schema_version": 1,
+  "task": "Mjlab-Getup-QddBiped",
+  "control_rate_hz": 50.0,
+  "policy_dt_s": 0.02,
+  "onnx": {
+    "input": {
+      "name": "obs",
+      "shape": [
+        1,
+        36
+      ],
+      "dtype": "float32"
+    },
+    "output": {
+      "name": "actions",
+      "shape": [
+        1,
+        10
+      ],
+      "dtype": "float32"
+    },
+    "obs_normalization": "baked into the ONNX graph: feed RAW observations",
+    "output_is": "deterministic action mean"
+  },
+  "action": {
+    "dim": 10,
+    "joint_order": [
+      "l_hip_yaw",
+      "l_hip_roll",
+      "l_hip_pitch",
+      "l_knee",
+      "l_ankle_pitch",
+      "r_hip_yaw",
+      "r_hip_roll",
+      "r_hip_pitch",
+      "r_knee",
+      "r_ankle_pitch"
+    ],
+    "scale": 0.5,
+    "default_joint_pos": [
+      0.0,
+      0.0,
+      -0.39269908169872414,
+      0.7853981633974483,
+      -0.39269908169872414,
+      0.0,
+      0.0,
+      -0.39269908169872414,
+      0.7853981633974483,
+      -0.39269908169872414
+    ],
+    "target": "q_target = default_joint_pos + scale * action",
+    "clip": null,
+    "filter": null
+  },
+  "actuators": {
+    "mode": "driver-side PD (MIT mode, >= 1 kHz): tau = kp * (q_target - q) - kd * qd, clamped to +/- effort_limit",
+    "joint_order": [
+      "l_hip_yaw",
+      "l_hip_roll",
+      "l_hip_pitch",
+      "l_knee",
+      "l_ankle_pitch",
+      "r_hip_yaw",
+      "r_hip_roll",
+      "r_hip_pitch",
+      "r_knee",
+      "r_ankle_pitch"
+    ],
+    "kp_nm_per_rad": [
+      30.0,
+      30.0,
+      40.0,
+      40.0,
+      20.0,
+      30.0,
+      30.0,
+      40.0,
+      40.0,
+      20.0
+    ],
+    "kd_nm_s_per_rad": [
+      1.0,
+      1.0,
+      1.2,
+      1.2,
+      0.6,
+      1.0,
+      1.0,
+      1.2,
+      1.2,
+      0.6
+    ],
+    "effort_limit_nm": [
+      11.0,
+      11.0,
+      11.0,
+      11.0,
+      6.28,
+      11.0,
+      11.0,
+      11.0,
+      11.0,
+      6.28
+    ],
+    "joint_pos_limits_rad": [
+      [
+        -0.523599,
+        0.523599
+      ],
+      [
+        -0.436332,
+        0.349066
+      ],
+      [
+        -1.74533,
+        0.698132
+      ],
+      [
+        0.0,
+        2.0944
+      ],
+      [
+        -0.872665,
+        0.872665
+      ],
+      [
+        -0.523599,
+        0.523599
+      ],
+      [
+        -0.349066,
+        0.436332
+      ],
+      [
+        -1.74533,
+        0.698132
+      ],
+      [
+        0.0,
+        2.0944
+      ],
+      [
+        -0.872665,
+        0.872665
+      ]
+    ],
+    "knee_max_note": "pose-dependent knee limit knee_max(hip_pitch) from robot/model.py (80/90/100/110/120 deg for hip_pitch > 0/-15/-30/-45/else deg) must be enforced by the safety layer"
+  },
+  "observation": {
+    "dim": 36,
+    "history_length": 1,
+    "scaling": "none (all terms in the units listed)",
+    "clip": null,
+    "terms": [
+      {
+        "name": "base_ang_vel",
+        "start": 0,
+        "size": 3,
+        "source": "imu_gyro",
+        "units": "rad/s",
+        "description": "torso angular velocity [wx, wy, wz] in the torso frame (x forward, y left, z up); raw gyro rotated into the torso frame"
+      },
+      {
+        "name": "projected_gravity",
+        "start": 3,
+        "size": 3,
+        "source": "projected_gravity",
+        "units": "unit vector",
+        "description": "gravity direction in the torso frame, normalised; (0, 0, -1) when upright (from the IMU orientation estimate: R_world_torso^T @ [0, 0, -1])"
+      },
+      {
+        "name": "joint_pos",
+        "start": 6,
+        "size": 10,
+        "source": "joint_pos_rel",
+        "units": "rad",
+        "description": "q - default_joint_pos, action.joint_order, output-side encoders"
+      },
+      {
+        "name": "joint_vel",
+        "start": 16,
+        "size": 10,
+        "source": "joint_vel",
+        "units": "rad/s",
+        "description": "joint velocity, action.joint_order"
+      },
+      {
+        "name": "actions",
+        "start": 26,
+        "size": 10,
+        "source": "last_action",
+        "units": "policy action units",
+        "description": "the raw (unscaled, unclipped) action output by the previous policy step; zeros at start"
+      }
+    ]
+  },
+  "kind": "getup",
+  "getup": {
+    "episode_length_s": 8.0,
+    "start": {
+      "max_gyro_rad_s": 0.3,
+      "still_s": 1.0,
+      "min_tilt_deg": 30.0
+    },
+    "done": {
+      "max_tilt_deg": 12.0,
+      "max_joint_err_rad": 0.25,
+      "max_gyro_rad_s": 0.5,
+      "hold_s": 0.5
+    },
+    "note": "trained from resting poses after falls (fall check -> damping), flat floor only; last action = zeros at the start; hand over to the walking policy in the default pose"
+  }
+}

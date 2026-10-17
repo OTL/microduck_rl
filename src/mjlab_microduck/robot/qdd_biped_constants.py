@@ -146,3 +146,114 @@ def knee_max(hip_pitch_rad: float) -> float:
     hp = math.degrees(hip_pitch_rad)
     k = 80 if hp > 0 else 90 if hp > -15 else 100 if hp > -30 else 110 if hp > -45 else 120
     return math.radians(k)
+
+
+# =============================================================================
+# Get-up (Mjlab-Getup-QddBiped): the robot lies on the floor, so every part that
+# can touch it needs a collision shape WITH friction (the walking model uses
+# frictionless condim-1 shapes only to detect a fall).
+#   - the walking collision shapes (torso boxes, thigh / shank capsules, knee
+#     spheres, soles) get condim 3 and friction,
+#   - the motor housings (blue visual cylinders: hip yaw / roll / pitch, knee,
+#     ankle) and the rabbit top of the torso get extra collision shapes. These
+#     touch the FLOOR only (contype 2 / conaffinity 0; the floor's conaffinity
+#     gets bit 2 in getup_scene_spec_fn), so the leg-leg self-collision check
+#     of the walking model is unchanged.
+# Not modelled: the rabbit ears (TPU, they bend) and the exact cover shapes
+# (roll_cap, shell_bumper_rear, knee_pad, shank_cover): the robot repo's
+# analysis/fall_sim.py uses the CAD meshes; check a trained get-up there.
+# =============================================================================
+GETUP_FLOOR_BIT = 2
+# Fallen-state library (scripts/qdd_getup_states.py): resting poses after falls.
+QDD_GETUP_POLICY_IO_JSON: Path = Path(os.path.dirname(__file__)) / "qdd_biped" / "policy_io_getup.json"
+QDD_GETUP_STATES_NPZ: Path = Path(os.path.dirname(__file__)) / "qdd_biped" / "getup_states.npz"
+MOTOR_VISUAL_RGBA = (0.15, 0.35, 0.75, 1.0)
+# Rabbit face + hatch on top of the torso (robot/model.py TORSO_ITEMS "rabbit"):
+# visual box centre / half sizes in the torso frame.
+TORSO_TOP_BOX = ((0.0157, 0.0, 0.15), (0.05, 0.08, 0.03))
+BODY_FRICTION = 0.6  # PA12 / TPU covers on a floor (randomised in the get-up env)
+
+
+def add_getup_collision_geoms(spec: mujoco.MjSpec) -> list[str]:
+    """Add floor-only collision shapes for the motor housings and the rabbit top
+    (see above). Returns the names of the added geoms."""
+    added: list[str] = []
+    for body in spec.bodies:
+        if body.name == "world":
+            continue
+        motors = [
+            g
+            for g in body.geoms
+            if g.type == mujoco.mjtGeom.mjGEOM_CYLINDER
+            and g.contype == 0
+            and all(abs(a - b) < 1e-3 for a, b in zip(g.rgba, MOTOR_VISUAL_RGBA))
+        ]
+        for i, g in enumerate(motors):
+            name = f"{body.name}_motor{i}_collision"
+            body.add_geom(
+                name=name,
+                type=mujoco.mjtGeom.mjGEOM_CYLINDER,
+                fromto=list(g.fromto),
+                size=list(g.size),
+                contype=GETUP_FLOOR_BIT,
+                conaffinity=0,
+                condim=3,
+                priority=1,
+                friction=(BODY_FRICTION, 0.02, 0.01),
+                group=3,
+                mass=0.0,
+                density=0.0,
+            )
+            added.append(name)
+        if body.name == TORSO_BODY:
+            pos, half = TORSO_TOP_BOX
+            body.add_geom(
+                name="torso_top_collision",
+                type=mujoco.mjtGeom.mjGEOM_BOX,
+                pos=list(pos),
+                size=list(half),
+                contype=GETUP_FLOOR_BIT,
+                conaffinity=0,
+                condim=3,
+                priority=1,
+                friction=(BODY_FRICTION, 0.02, 0.01),
+                group=3,
+                mass=0.0,
+                density=0.0,
+            )
+            added.append("torso_top_collision")
+    return added
+
+
+def get_qdd_biped_getup_spec() -> mujoco.MjSpec:
+    spec = get_qdd_biped_spec()
+    add_getup_collision_geoms(spec)
+    return spec
+
+
+# Every collision shape with friction; soles keep their own friction (priority).
+_FLOOR_ONLY = r"^(.*_motor\d+_collision|torso_top_collision)$"
+GETUP_COLLISION = CollisionCfg(
+    geom_names_expr=(r".*_collision",),
+    contype={_FLOOR_ONLY: GETUP_FLOOR_BIT, r".*_collision": 1},
+    conaffinity={_FLOOR_ONLY: 0, r".*_collision": 1},
+    condim={r".*_collision": 3},
+    priority={r".*_collision": 1},
+    friction={r"^(l|r)_foot_collision$": (0.8,), r".*_collision": (BODY_FRICTION,)},
+)
+
+
+def get_qdd_biped_getup_robot_cfg() -> EntityCfg:
+    return EntityCfg(
+        spec_fn=get_qdd_biped_getup_spec,
+        init_state=HOME_FRAME,
+        collisions=(GETUP_COLLISION,),
+        articulation=QDD_ARTICULATION,
+    )
+
+
+def getup_scene_spec_fn(spec: mujoco.MjSpec) -> None:
+    """Scene spec_fn: let the floor collide with the floor-only shapes."""
+    terrain = spec.body("terrain")
+    for g in terrain.geoms:
+        g.conaffinity = g.conaffinity | GETUP_FLOOR_BIT
