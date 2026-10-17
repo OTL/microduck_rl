@@ -198,7 +198,7 @@
   },
   "kind": "getup",
   "getup": {
-    "episode_length_s": 8.0,
+    "episode_length_s": 12.0,
     "start": {
       "max_gyro_rad_s": 0.3,
       "still_s": 1.0,

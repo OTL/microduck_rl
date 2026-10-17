@@ -12,6 +12,7 @@ import torch
 from mjlab_microduck.tasks import mdp as microduck_mdp
 from mjlab_microduck.tasks import symmetry as sym
 from mjlab_microduck.tasks.qdd_biped_getup_env_cfg import (
+    GETUP_KIND_PROBS,
     GETUP_ACTION_SCALE,
     build_getup_policy_io,
     getup_policy_io_json,
@@ -65,7 +66,7 @@ def test_getup_state_library():
     # every kind represented
     assert kinds == ["push", "stride", "drop", "crouch", "path"]
     for i, k in enumerate(kinds):
-        assert (d["kind"] == i).sum() > 0.1 * n, k
+        assert (d["kind"] == i).sum() > 0.05 * n, k
     # velocities: zero for the simulated (resting) kinds, stored for path states
     assert d["root_vel"].shape == (n, 6) and d["joint_vel"].shape == (n, 10)
     path = d["kind"] == kinds.index("path")
@@ -282,3 +283,97 @@ def test_getup_path_mirror_is_an_involution():
     assert np.allclose(q2, q) and np.allclose(v2, v)
     qm, _ = gen._mirror(q, v)
     assert np.allclose(qm[7:12], q[12:17] * [-1, -1, 1, 1, 1])  # legs swapped, yaw / roll negated
+
+
+# ---------------------------------------------------------------- path reverse curriculum
+
+
+def _path_remain_s():
+    import importlib.util
+    from pathlib import Path
+
+    p = Path(__file__).resolve().parents[1] / "scripts" / "qdd_getup_states.py"
+    spec = importlib.util.spec_from_file_location("qdd_getup_states", p)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.path_remain_s
+
+
+def test_getup_library_remain_s():
+    remain = _path_remain_s()
+    # demo 0 (prone, 3 frames) ends standing; demo 1 (2 frames) ends at demo 0's start
+    r = remain(np.array([0, 0, 0, 1, 1]), dt=0.02)
+    assert np.allclose(r, [0.04, 0.02, 0.0, 0.06, 0.04])
+    d = np.load(rc.QDD_GETUP_STATES_NPZ)
+    path = d["kind"] == list(d["kinds"]).index("path")
+    assert np.all(d["remain_s"][~path] == -1.0)
+    assert d["remain_s"][path].min() < 0.1 and d["remain_s"][path].max() > 8.0
+
+
+@pytest.fixture(scope="module")
+def getup_train_env():
+    from mjlab.envs import ManagerBasedRlEnv
+
+    cfg = make_qdd_biped_getup_env_cfg(play=False)
+    cfg.scene.num_envs = 8
+    env = ManagerBasedRlEnv(cfg=cfg, device="cpu")
+    yield env
+    env.close()
+
+
+def test_getup_path_starts_follow_the_frontier(getup_train_env):
+    env = getup_train_env
+    term = env.event_manager.get_term_cfg("reset_getup").func
+    assert term.frontier_s == 1.0
+    idx = term._sample(20000, GETUP_KIND_PROBS, "cpu")
+    kind = term.kind[idx]
+    p = term.kinds.index("path")
+    assert torch.all(term.remain_s[idx[kind == p]] <= 1.0)
+    # half of the path draws from the band (0.5, 1.0]
+    band = (term.remain_s[idx[kind == p]] > 0.5).float().mean()
+    assert 0.6 < band < 0.9
+    # per-kind shares as configured
+    for k, share in GETUP_KIND_PROBS.items():
+        assert abs((kind == term.kinds.index(k)).float().mean() - share) < 0.02, k
+
+
+def test_getup_path_frontier_moves_back_only_when_band_stands(getup_train_env, monkeypatch):
+    env = getup_train_env
+    term = env.event_manager.get_term_cfg("reset_getup").func
+    cur = env.curriculum_manager.get_term_cfg("path_frontier")
+    fn = cur.func
+    ids = torch.arange(env.num_envs)
+    rounds = cur.params["window"] // env.num_envs + 1
+    stood = {"v": 0.0}
+    monkeypatch.setattr(
+        microduck_mdp, "_getup_standing_score", lambda env, *a, **k: torch.full((env.num_envs,), stood["v"])
+    )
+    term.frontier_s = 1.0
+    fn.n = fn.ok = 0
+    env.episode_length_buf[:] = 10
+    term.index[:] = int(torch.nonzero(term.is_path)[0, 0])
+
+    # band starts that end lying: the frontier stays
+    for _ in range(rounds):
+        term.in_band[:] = True
+        out = fn(env, ids, **cur.params)
+    assert term.frontier_s == 1.0 and out["band_stood"] == 0.0
+    # starts outside the band do not count, even standing
+    stood["v"] = 1.0
+    fn.n = fn.ok = 0
+    term.in_band[:] = False
+    for _ in range(rounds):
+        fn(env, ids, **cur.params)
+    assert fn.n == 0 and term.frontier_s == 1.0
+    # band starts that end standing: one step back per window
+    for _ in range(rounds):
+        term.in_band[:] = True
+        out = fn(env, ids, **cur.params)
+    assert term.frontier_s == 1.0 + cur.params["step_s"]
+    assert out["frontier_s"] == term.frontier_s and out["end_stood_path"] > 0.5
+    # the startup reset (episode length 0) is ignored
+    env.episode_length_buf[:] = 0
+    fn.n = 0
+    fn(env, ids, **cur.params)
+    assert fn.n == 0
+    term.frontier_s = 1.0

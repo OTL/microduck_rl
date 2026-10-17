@@ -8209,8 +8209,15 @@ class reset_from_getup_states:
     origin, at rest (or, for "path" states, with their stored velocities).
     ``standing_prob`` of the resets start standing in the
     default pose instead (the policy must also just keep standing, and a
-    hand-over to walking starts from there). ``kind_probs`` weighs the library
-    kinds ("push", "stride", "drop"); None = as stored."""
+    hand-over to walking starts from there). ``kind_probs`` is the share of
+    each library kind among the lying starts; None = as stored.
+
+    Reverse curriculum on "path" states (``path_frontier_s`` set): only path
+    states with at most ``frontier_s`` seconds of the demo left until standing
+    (library ``remain_s``) are drawn, half of them from the band
+    (frontier_s - band_s, frontier_s]. The curriculum term
+    getup_path_frontier moves frontier_s back toward the lying start each time
+    the band starts end the episode standing often enough."""
 
     def __init__(self, cfg, env: ManagerBasedRlEnv):
         path = cfg.params["states_path"]
@@ -8231,15 +8238,45 @@ class reset_from_getup_states:
         self.joint_vel = torch.tensor(jv, dtype=torch.float32, device=dev)
         self.kinds = [str(k) for k in data["kinds"]]
         self.n = self.root_z.shape[0]
+        rs = data["remain_s"] if "remain_s" in data.files else np.full(n, -1.0, np.float32)
+        self.remain_s = torch.tensor(rs, dtype=torch.float32, device=dev)
+        self.is_path = self.kind == self.kinds.index("path") if "path" in self.kinds else torch.zeros_like(self.kind, dtype=torch.bool)
+        # path reverse curriculum (None = all path states)
+        self.frontier_s: float | None = cfg.params.get("path_frontier_s")
+        self.band_s: float = float(cfg.params.get("path_band_s", 0.5))
+        self.max_remain_s = float(self.remain_s[self.is_path].max()) if self.is_path.any() else 0.0
         # last sampled library index per env (-1 = standing start); for metrics/tests
         self.index = torch.full((env.num_envs,), -1, dtype=torch.long, device=dev)
+        # this episode started in the frontier band
+        self.in_band = torch.zeros(env.num_envs, dtype=torch.bool, device=dev)
+
+    def _band(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """(eligible, band) masks over the library for the current frontier."""
+        if self.frontier_s is None or self.frontier_s >= self.max_remain_s:
+            elig = self.is_path.clone()
+            lo = (self.max_remain_s if self.frontier_s is None else self.frontier_s) - self.band_s
+        else:
+            elig = self.is_path & (self.remain_s <= self.frontier_s)
+            lo = self.frontier_s - self.band_s
+        band = elig & (self.remain_s > lo)
+        return elig, band
 
     def _sample(self, num: int, kind_probs, device) -> torch.Tensor:
         if kind_probs is None:
             return torch.randint(0, self.n, (num,), device=device)
         w = torch.zeros(self.n, device=device)
         for k, p in kind_probs.items():
-            w[self.kind == self.kinds.index(k)] = float(p)
+            if k not in self.kinds:
+                continue
+            sel = self.kind == self.kinds.index(k)
+            if k == "path":
+                elig, band = self._band()
+                wp = elig.float() / elig.sum().clamp(min=1)
+                if band.any():
+                    wp = 0.5 * wp + 0.5 * band.float() / band.sum()
+                w += float(p) * wp
+            elif sel.any():
+                w[sel] = float(p) / sel.sum()
         return torch.multinomial(w, num, replacement=True)
 
     def __call__(
@@ -8251,6 +8288,8 @@ class reset_from_getup_states:
         kind_probs: dict | None = None,
         fixed_order: bool = False,
         z_lift: float = 0.003,
+        path_frontier_s: float | None = None,  # read once at init (then moved by getup_path_frontier)
+        path_band_s: float = 0.5,
         asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
     ) -> None:
         if env_ids is None:
@@ -8268,6 +8307,8 @@ class reset_from_getup_states:
             idx = self._sample(num, kind_probs, dev)
             standing = torch.rand(num, device=dev) < standing_prob
         self.index[env_ids] = torch.where(standing, -1, idx)
+        _, band = self._band()
+        self.in_band[env_ids] = band[idx] & ~standing
 
         yaw = (torch.rand(num, device=dev) * 2 - 1) * math.pi
         q_yaw = torch.stack(
@@ -8383,6 +8424,65 @@ def _log_stood_by_start_kind(env: ManagerBasedRlEnv, stood: torch.Tensor) -> Non
         sel = kind == i
         if sel.any():
             env.extras["log"][f"Metrics/getup_stood_frac_{name}"] = stood[sel].mean()
+
+
+class getup_path_frontier:
+    """CURRICULUM (reverse curriculum over the found get-up): at each reset,
+    looks at the envs ending an episode (before they are reset) and counts the
+    ones that had started in reset_getup's frontier band and END it standing
+    (getup_standing score > 0.5). Every ``window`` such episodes, if at least
+    ``promote_at`` of them stood, the frontier moves ``step_s`` seconds further
+    back along the demo (toward lying on the floor). Also keeps an EMA of the
+    end-of-episode standing share per start kind (the real fall kinds are the
+    goal). Returns them for logging (Curriculum/<term>/...)."""
+
+    def __init__(self, cfg: "CurriculumTermCfg", env: ManagerBasedRlEnv):
+        self.n = 0
+        self.ok = 0
+        self.last_rate = 0.0
+        self.ema: dict[str, float] = {}
+
+    def __call__(
+        self,
+        env: ManagerBasedRlEnv,
+        env_ids: torch.Tensor | slice,
+        stand_z: float,
+        sensor_name: str,
+        step_s: float = 0.5,
+        promote_at: float = 0.5,
+        window: int = 256,
+        ema: float = 0.02,
+        event_name: str = "reset_getup",
+    ) -> dict[str, float]:
+        term = env.event_manager.get_term_cfg(event_name).func
+        assert isinstance(term, reset_from_getup_states)
+        if isinstance(env_ids, slice):
+            env_ids = torch.arange(env.num_envs, device=env.device)[env_ids]
+        ran = env.episode_length_buf[env_ids] > 0  # skip the reset at startup
+        ids = env_ids[ran]
+        if len(ids) > 0:
+            stood = _getup_standing_score(env, stand_z, 0.05, 0.06, sensor_name)[ids] > 0.5
+            band = term.in_band[ids]
+            self.n += int(band.sum())
+            self.ok += int((band & stood).sum())
+            if self.n >= window:
+                self.last_rate = self.ok / self.n
+                if term.frontier_s is not None and self.last_rate >= promote_at:
+                    term.frontier_s = min(term.frontier_s + step_s, term.max_remain_s + step_s)
+                self.n = self.ok = 0
+            idx = term.index[ids]
+            kind = torch.where(idx < 0, -1, term.kind[idx.clamp(min=0)])
+            for i, name in [(-1, "standing")] + list(enumerate(term.kinds)):
+                sel = kind == i
+                if sel.any():
+                    r = float(stood[sel].float().mean())
+                    m = int(sel.sum())
+                    a = 1.0 - (1.0 - ema) ** m
+                    self.ema[name] = r if name not in self.ema else (1 - a) * self.ema[name] + a * r
+        out = {"frontier_s": float(term.frontier_s) if term.frontier_s is not None else -1.0,
+               "band_stood": self.last_rate}
+        out.update({f"end_stood_{k}": v for k, v in self.ema.items()})
+        return out
 
 
 def getup_stand_still(

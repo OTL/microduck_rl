@@ -59,7 +59,9 @@ from mjlab_microduck.tasks.symmetry import QDD_SYMMETRY_CFG, PpoWithSymmetryCfg
 
 TASK_ID = "Mjlab-Getup-QddBiped"
 
-EPISODE_LENGTH_S = 8.0
+# getup4: 12 s (was 8). The found supine get-up (roll to the front, then the
+# prone get-up) takes ~10 s at demo speed.
+EPISODE_LENGTH_S = 12.0
 # Action = offset from the default pose x scale. Getting up needs the whole
 # joint range (hip pitch -100 deg, knee 120 deg vs default -22.5 / 45 deg):
 # with the walking 0.25 rad that is an action of ~5; 0.5 halves it.
@@ -71,7 +73,20 @@ STANDING_START_PROB = 0.1
 # Start mix (library kinds). getup2: crouch 31 % stood, real falls 0 %. "path"
 # = states along the found get-up WITH velocities (reverse curriculum on a
 # motion known to work), so it gets the largest share.
-GETUP_KIND_PROBS = {"push": 0.2, "stride": 0.15, "drop": 0.1, "crouch": 0.15, "path": 0.4}
+# getup3: path 35 % stood (from the late, nearly standing part of the motion),
+# real falls 0 %: the path starts now follow a reverse curriculum (below). The
+# probabilities are per kind (getup1-3 weighed them per state, so kinds with
+# more states got more).
+GETUP_KIND_PROBS = {"push": 0.15, "stride": 0.1, "drop": 0.1, "crouch": 0.1, "path": 0.55}
+# Path reverse curriculum (getup_path_frontier): start with the last
+# PATH_FRONTIER_START_S of the demo, move PATH_FRONTIER_STEP_S back toward
+# lying on the floor whenever PATH_PROMOTE_AT of the band starts (the last
+# PATH_BAND_S before the frontier) end the episode standing.
+PATH_FRONTIER_START_S = 1.0
+PATH_FRONTIER_STEP_S = 0.5
+PATH_BAND_S = 0.5
+PATH_PROMOTE_AT = 0.5
+PATH_PROMOTE_WINDOW = 256  # band episodes per decision
 
 # Standing (getup_standing): torso height at the default pose = STAND_BASE_Z.
 STAND_UP_SCALE = 0.05  # exp(-(1 - cos tilt) / s): 10 deg -> 0.74, 20 deg -> 0.30
@@ -99,7 +114,7 @@ BODY_FRICTION_RANGE = (0.3, 1.0)  # PA12 / TPU on tiles .. carpet
 KNEE_LIMIT_TERMINATION_TOL = 0.6  # rad
 
 # Play / export video: these library states in this order, one per env.
-PLAY_EPISODE_S = 6.0
+PLAY_EPISODE_S = 10.0
 
 
 def make_qdd_biped_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
@@ -207,6 +222,8 @@ def make_qdd_biped_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "states_path": str(QDD_GETUP_STATES_NPZ),
                 "standing_prob": STANDING_START_PROB,
                 "kind_probs": GETUP_KIND_PROBS,
+                "path_frontier_s": PATH_FRONTIER_START_S,
+                "path_band_s": PATH_BAND_S,
             },
         ),
         **cfg.events,
@@ -224,6 +241,16 @@ def make_qdd_biped_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
     # --- Curricula -----------------------------------------------------------------
     cfg.curriculum = {
+        "path_frontier": CurriculumTermCfg(
+            func=microduck_mdp.getup_path_frontier,
+            params={
+                "stand_z": STAND_BASE_Z,
+                "sensor_name": feet_ground_cfg.name,
+                "step_s": PATH_FRONTIER_STEP_S,
+                "promote_at": PATH_PROMOTE_AT,
+                "window": PATH_PROMOTE_WINDOW,
+            },
+        ),
         # Smoothness only after the get-up exists (AGENTS.md: no attempt-tax
         # while a hard skill is being discovered).
         "action_rate_weight": CurriculumTermCfg(

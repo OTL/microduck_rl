@@ -97,6 +97,13 @@ uv run python -m mjlab_microduck.tasks.qdd_biped_getup_env_cfg   # policy_io_get
   - 仰向け → 直接立つ：見つからなかった。仰向け → うつ伏せへの寝返りは見つかった。
   - この動きを `robot/qdd_biped/getup_demo_traj.npz`（20 ms ごとの qpos / qvel）に保存。
 - getup3：ライブラリに「path」（見つけた動きの途中の姿勢 1500 件。速度つき、左右反転あり、少しノイズ）を加え、開始の割合を path 40%・push 20%・stride 15%・crouch 15%・drop 10%（ほかに立った姿勢 10%）にした。行動の倍率は 0.75（股関節を -100° まで動かせるように）、胴の回転の罰は 7 rad/s から。
+  - 結果（1014 反復で切り上げ）：path から始めると 35% 立てた（ほぼ立ち上がった後半からの分が多い）。本当に倒れた姿勢からは今回も 0%。
+- getup4：path の開始に「逆向きのカリキュラム」を入れた（`mdp.getup_path_frontier`）。
+  - ライブラリの各 path 状態に「動きの残り時間」`remain_s` を持たせた（うつ伏せの動きは立つまで、寝返りはその後うつ伏せの動きを足す。最大 9.8 秒）。
+  - 最初は残り 1 秒以内の状態だけから始める。境目の 0.5 秒（band）から始めた回の半分以上が、回の終わりに立っていれば、境目を 0.5 秒ずつ前（床に倒れた側）へ動かす。path の開始の半分は band から選ぶ。
+  - wandb：`Curriculum/path_frontier/frontier_s`（境目）、`band_stood`、`end_stood_<kind>`（回の終わりに立っていた割合。push・stride・drop が本当の目標）。
+  - 開始の割合は種類ごとに決めた値どおりに直した（getup1〜3 は 1 件あたりの重みだったので、件数の多い種類が多く出ていた）。path 55%・push 15%・stride 10%・drop 10%・crouch 10%。
+  - 1 回を 12 秒に延ばした（仰向けからは寝返りと起き上がりで約 10 秒）。path は 3000 件。
 
 ### わかっていないこと
 

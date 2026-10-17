@@ -58,6 +58,7 @@ KINDS = ("push", "stride", "drop", "crouch", "path")
 KIND_P = (0.3, 0.25, 0.2, 0.25)  # simulated kinds; "path" rows are added on top (--n-path)
 SIM_KINDS = KINDS[:4]
 FALL_KINDS = ("push", "stride", "drop")
+DEMO_DT = 0.02  # s between demo frames (scripts/qdd_getup_search/export_traj.py)
 
 
 def build_model() -> mujoco.MjModel:
@@ -258,9 +259,22 @@ def _mirror(qpos: np.ndarray, qvel_world: np.ndarray):
     return q, v
 
 
+def path_remain_s(demo: np.ndarray, dt: float = DEMO_DT) -> np.ndarray:
+    """Per demo frame: the demo time left until standing [s]. Demo 0 ends
+    standing; every other demo (the supine roll) ends lying prone, at the start
+    of demo 0, so demo 0's whole length is added."""
+    out = np.zeros(len(demo), np.float32)
+    n0 = int(np.sum(demo == 0))
+    for k in np.unique(demo):
+        idx = np.flatnonzero(demo == k)
+        out[idx] = (len(idx) - 1 - np.arange(len(idx))) * dt + (0 if k == 0 else (n0 - 1) * dt)
+    return out
+
+
 def sample_path_states(path: Path, n: int, seed: int, m: mujoco.MjModel):
     """n states along the demo trajectories (velocities in the world frame),
-    random mirror, joint noise 0.03 rad, velocity scale 0.8-1.2."""
+    random mirror, joint noise 0.03 rad, velocity scale 0.8-1.2. Each row ends
+    with the demo time left until standing (path_remain_s)."""
     rng = np.random.default_rng(seed)
     dd = np.load(path)
     Q, V = dd["qpos"].astype(np.float64), dd["qvel"].astype(np.float64)
@@ -268,6 +282,7 @@ def sample_path_states(path: Path, n: int, seed: int, m: mujoco.MjModel):
     lo, hi = m.jnt_range[1:, 0], m.jnt_range[1:, 1]
     demo = dd["demo"] if "demo" in dd.files else np.zeros(len(Q), np.int8)
     frames = [np.flatnonzero(demo == k) for k in np.unique(demo)]
+    remain = path_remain_s(demo)
     rows = []
     for _ in range(n):
         i = rng.choice(frames[rng.integers(len(frames))])  # each demo equally often
@@ -285,7 +300,9 @@ def sample_path_states(path: Path, n: int, seed: int, m: mujoco.MjModel):
         vw *= rng.uniform(0.8, 1.2)
         d.qpos[:] = q
         mujoco.mj_kinematics(m, d)
-        rows.append((float(q[2]), q[3:7].copy(), q[7:].copy(), _tilt_deg(d), vw[:6].copy(), vw[6:].copy()))
+        rows.append(
+            (float(q[2]), q[3:7].copy(), q[7:].copy(), _tilt_deg(d), vw[:6].copy(), vw[6:].copy(), float(remain[i]))
+        )
     return rows
 
 
@@ -303,12 +320,27 @@ def main():
     ap.add_argument("--workers", type=int, default=0)
     ap.add_argument("--n-path", type=int, default=1500, help="states along the demo get-ups")
     ap.add_argument("--demo", default=str(rc.QDD_GETUP_DEMO_NPZ))
+    ap.add_argument(
+        "--reuse-sim", default="", help="take the simulated (non-path) rows from this library instead of simulating"
+    )
     a = ap.parse_args()
-    rng = np.random.default_rng(a.seed)
-    jobs = [(a.seed * 100000 + i, SIM_KINDS[rng.choice(len(SIM_KINDS), p=KIND_P)]) for i in range(int(a.n * 1.3))]
-    with mp.Pool(a.workers or None) as pool:
-        res = pool.map(_work, jobs, chunksize=8)
-    rows = [(k, r) for k, r in res if r is not None][: a.n]
+    if a.reuse_sim:
+        old = np.load(a.reuse_sim)
+        old_kinds = [str(k) for k in old["kinds"]]
+        rows = []
+        for j in range(len(old["root_z"])):
+            k = old_kinds[old["kind"][j]]
+            if k == "path":
+                continue
+            rows.append((k, (float(old["root_z"][j]), old["root_quat"][j], old["joint_pos"][j],
+                             float(old["tilt_deg"][j]), old["root_vel"][j], old["joint_vel"][j])))
+        res = rows
+    else:
+        rng = np.random.default_rng(a.seed)
+        jobs = [(a.seed * 100000 + i, SIM_KINDS[rng.choice(len(SIM_KINDS), p=KIND_P)]) for i in range(int(a.n * 1.3))]
+        with mp.Pool(a.workers or None) as pool:
+            res = pool.map(_work, jobs, chunksize=8)
+        rows = [(k, r) for k, r in res if r is not None][: a.n]
     if a.n_path > 0:
         rows += [("path", r) for r in sample_path_states(Path(a.demo), a.n_path, a.seed + 7, build_model())]
     z = np.array([r[0] for _, r in rows], np.float32)
@@ -318,10 +350,11 @@ def main():
     kind = np.array([KINDS.index(k) for k, _ in rows], np.int8)
     root_vel = np.array([r[4] for _, r in rows], np.float32)
     joint_vel = np.array([r[5] for _, r in rows], np.float32)
+    remain_s = np.array([r[6] if len(r) > 6 else -1.0 for _, r in rows], np.float32)
     Path(a.out).parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
         a.out, root_z=z, root_quat=quat, joint_pos=q, tilt_deg=tilt, kind=kind,
-        root_vel=root_vel, joint_vel=joint_vel,
+        root_vel=root_vel, joint_vel=joint_vel, remain_s=remain_s,
         kinds=np.array(KINDS), joint_names=np.array(rc.QDD_JOINT_NAMES),
     )
     print(f"{len(rows)} states ({len(res) - sum(r is None for _, r in res)} usable of {len(res)}) -> {a.out}")
