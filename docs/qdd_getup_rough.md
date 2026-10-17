@@ -105,6 +105,12 @@ uv run python -m mjlab_microduck.tasks.qdd_biped_getup_env_cfg   # policy_io_get
   - wandb：`Curriculum/path_frontier/frontier_s`（境目）、`band_stood`、`end_stood_<kind>`（回の終わりに立っていた割合。push・stride・drop が本当の目標）。
   - 開始の割合は種類ごとに決めた値どおりに直した（getup1〜3 は 1 件あたりの重みだったので、件数の多い種類が多く出ていた）。path 55%・push 15%・stride 10%・drop 10%・crouch 10%。
   - 1 回を 12 秒に延ばした（仰向けからは寝返りと起き上がりで約 10 秒）。path は 3000 件。
+  - 結果（途中、約 600 反復）：境目は 438 反復で 5 秒まで進んだ（うつ伏せの動きの最初、床に伏せた姿勢からは立てた）が、寝返りの終わり 1.6 秒前で止まった。本当の転倒からは 0%。
+- getup5：見つけた動きの開始姿勢と、同じ向き（うつ伏せ / 仰向け）の本当の転倒の間をつなぐ「bridge」開始を加えた（`bridge_prone`・`bridge_supine` 各 1500 件）。
+  - alpha = 0 が動きの開始姿勢、1 が本当の転倒。向き（向きの方角は除く）は球面補間、関節は線形補間し、床に置いて 1 秒その関節を保ち、1 秒力を抜いて止まったものを使う。寝返ってしまったものは捨てる。
+  - それぞれに境目（alpha 0.1 から 0.1 ずつ）を持たせ、path とは別に進める（寝返りが止まっても、うつ伏せ側は進める）。
+  - 開始の割合：path 35%・bridge_prone 20%・bridge_supine 15%・push 10%・crouch 10%・stride 5%・drop 5%。
+  - wandb：`frontier_bridge_*`・`band_stood_bridge_*`、本当の転倒を向きで分けた `end_stood_fall_prone`・`end_stood_fall_supine`。
 
 ### わかっていないこと
 

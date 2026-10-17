@@ -8212,12 +8212,13 @@ class reset_from_getup_states:
     hand-over to walking starts from there). ``kind_probs`` is the share of
     each library kind among the lying starts; None = as stored.
 
-    Reverse curriculum on "path" states (``path_frontier_s`` set): only path
-    states with at most ``frontier_s`` seconds of the demo left until standing
-    (library ``remain_s``) are drawn, half of them from the band
-    (frontier_s - band_s, frontier_s]. The curriculum term
-    getup_path_frontier moves frontier_s back toward the lying start each time
-    the band starts end the episode standing often enough."""
+    Reverse curricula (``frontiers`` = {kind: {"start": .., "band": ..}}): a
+    kind listed there is drawn only up to its frontier along its level (path:
+    library ``remain_s``, the demo seconds left until standing; bridge_*:
+    ``alpha``, 0 = the demo start .. 1 = a real fall), half of the draws from
+    the band (frontier - band, frontier]. The curriculum term
+    getup_path_frontier moves a frontier on each time its band starts end the
+    episode standing often enough."""
 
     def __init__(self, cfg, env: ManagerBasedRlEnv):
         path = cfg.params["states_path"]
@@ -8239,26 +8240,52 @@ class reset_from_getup_states:
         self.kinds = [str(k) for k in data["kinds"]]
         self.n = self.root_z.shape[0]
         rs = data["remain_s"] if "remain_s" in data.files else np.full(n, -1.0, np.float32)
+        al = data["alpha"] if "alpha" in data.files else np.full(n, -1.0, np.float32)
         self.remain_s = torch.tensor(rs, dtype=torch.float32, device=dev)
+        # curriculum level per state: path = remain_s, bridge_* = alpha
+        self.level = torch.where(
+            torch.tensor(al, device=dev) >= 0, torch.tensor(al, dtype=torch.float32, device=dev), self.remain_s
+        )
         self.is_path = self.kind == self.kinds.index("path") if "path" in self.kinds else torch.zeros_like(self.kind, dtype=torch.bool)
-        # path reverse curriculum (None = all path states)
-        self.frontier_s: float | None = cfg.params.get("path_frontier_s")
-        self.band_s: float = float(cfg.params.get("path_band_s", 0.5))
-        self.max_remain_s = float(self.remain_s[self.is_path].max()) if self.is_path.any() else 0.0
+        # face of each state: True = prone (body x axis pointing down)
+        w, x, y, z = self.root_quat.unbind(-1)
+        self.prone = 2 * (x * z - w * y) < 0
+        # reverse curricula: kind -> frontier / band / max level
+        fr = dict(cfg.params.get("frontiers") or {})
+        if cfg.params.get("path_frontier_s") is not None:
+            fr.setdefault("path", {"start": cfg.params["path_frontier_s"], "band": cfg.params.get("path_band_s", 0.5)})
+        self.frontier: dict[str, float] = {}
+        self.band: dict[str, float] = {}
+        self.max_level: dict[str, float] = {}
+        for k, v in fr.items():
+            if k not in self.kinds or not (self.kind == self.kinds.index(k)).any():
+                continue
+            self.frontier[k] = float(v["start"])
+            self.band[k] = float(v.get("band", 0.5))
+            self.max_level[k] = float(self.level[self.kind == self.kinds.index(k)].max())
         # last sampled library index per env (-1 = standing start); for metrics/tests
         self.index = torch.full((env.num_envs,), -1, dtype=torch.long, device=dev)
-        # this episode started in the frontier band
-        self.in_band = torch.zeros(env.num_envs, dtype=torch.bool, device=dev)
+        # this episode started in a frontier band: that kind's index, else -1
+        self.in_band = torch.full((env.num_envs,), -1, dtype=torch.long, device=dev)
 
-    def _band(self) -> tuple[torch.Tensor, torch.Tensor]:
-        """(eligible, band) masks over the library for the current frontier."""
-        if self.frontier_s is None or self.frontier_s >= self.max_remain_s:
-            elig = self.is_path.clone()
-            lo = (self.max_remain_s if self.frontier_s is None else self.frontier_s) - self.band_s
+    @property
+    def frontier_s(self) -> float | None:  # the path frontier (round 4 name)
+        return self.frontier.get("path")
+
+    @frontier_s.setter
+    def frontier_s(self, v: float) -> None:
+        self.frontier["path"] = float(v)
+
+    def _band(self, k: str) -> tuple[torch.Tensor, torch.Tensor]:
+        """(eligible, band) masks over the library for kind k's frontier."""
+        sel = self.kind == self.kinds.index(k)
+        f = self.frontier[k]
+        if f >= self.max_level[k]:
+            elig = sel.clone()
+            f = self.max_level[k]
         else:
-            elig = self.is_path & (self.remain_s <= self.frontier_s)
-            lo = self.frontier_s - self.band_s
-        band = elig & (self.remain_s > lo)
+            elig = sel & (self.level <= f)
+        band = elig & (self.level > f - self.band[k])
         return elig, band
 
     def _sample(self, num: int, kind_probs, device) -> torch.Tensor:
@@ -8269,8 +8296,8 @@ class reset_from_getup_states:
             if k not in self.kinds:
                 continue
             sel = self.kind == self.kinds.index(k)
-            if k == "path":
-                elig, band = self._band()
+            if k in self.frontier:
+                elig, band = self._band(k)
                 wp = elig.float() / elig.sum().clamp(min=1)
                 if band.any():
                     wp = 0.5 * wp + 0.5 * band.float() / band.sum()
@@ -8288,7 +8315,8 @@ class reset_from_getup_states:
         kind_probs: dict | None = None,
         fixed_order: bool = False,
         z_lift: float = 0.003,
-        path_frontier_s: float | None = None,  # read once at init (then moved by getup_path_frontier)
+        frontiers: dict | None = None,  # read once at init (then moved by getup_path_frontier)
+        path_frontier_s: float | None = None,  # round-4 form of frontiers={"path": ...}
         path_band_s: float = 0.5,
         asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
     ) -> None:
@@ -8307,8 +8335,11 @@ class reset_from_getup_states:
             idx = self._sample(num, kind_probs, dev)
             standing = torch.rand(num, device=dev) < standing_prob
         self.index[env_ids] = torch.where(standing, -1, idx)
-        _, band = self._band()
-        self.in_band[env_ids] = band[idx] & ~standing
+        in_band = torch.full((num,), -1, dtype=torch.long, device=dev)
+        for k in self.frontier:
+            _, band = self._band(k)
+            in_band = torch.where(band[idx], self.kinds.index(k), in_band)
+        self.in_band[env_ids] = torch.where(standing, -1, in_band)
 
         yaw = (torch.rand(num, device=dev) * 2 - 1) * math.pi
         q_yaw = torch.stack(
@@ -8427,20 +8458,42 @@ def _log_stood_by_start_kind(env: ManagerBasedRlEnv, stood: torch.Tensor) -> Non
 
 
 class getup_path_frontier:
-    """CURRICULUM (reverse curriculum over the found get-up): at each reset,
-    looks at the envs ending an episode (before they are reset) and counts the
-    ones that had started in reset_getup's frontier band and END it standing
-    (getup_standing score > 0.5). Every ``window`` such episodes, if at least
-    ``promote_at`` of them stood, the frontier moves ``step_s`` seconds further
-    back along the demo (toward lying on the floor). Also keeps an EMA of the
-    end-of-episode standing share per start kind (the real fall kinds are the
-    goal). Returns them for logging (Curriculum/<term>/...)."""
+    """CURRICULUM (reverse curricula of reset_getup): at each reset, looks at
+    the envs ending an episode (before they are reset) and, per curriculum kind
+    (path, bridge_*), counts the ones that had started in its frontier band and
+    END it standing (getup_standing score > 0.5). Every ``window`` such
+    episodes of a kind, if at least ``promote_at`` of them stood, its frontier
+    moves on by ``steps[kind]`` (``step_s`` for path). Also keeps an EMA of the
+    end-of-episode standing share per start kind, and for the real falls
+    (push / stride / drop) per face (prone / supine): the goal. Returns them
+    for logging (Curriculum/<term>/...)."""
 
     def __init__(self, cfg: "CurriculumTermCfg", env: ManagerBasedRlEnv):
-        self.n = 0
-        self.ok = 0
-        self.last_rate = 0.0
+        self.cnt: dict[str, list[int]] = {}
+        self.last_rate: dict[str, float] = {}
         self.ema: dict[str, float] = {}
+
+    # round-4 names (tests)
+    @property
+    def n(self) -> int:
+        return self.cnt.get("path", [0, 0])[0]
+
+    @n.setter
+    def n(self, v: int) -> None:
+        self.cnt.setdefault("path", [0, 0])[0] = v
+
+    @property
+    def ok(self) -> int:
+        return self.cnt.get("path", [0, 0])[1]
+
+    @ok.setter
+    def ok(self, v: int) -> None:
+        self.cnt.setdefault("path", [0, 0])[1] = v
+
+    def _ema(self, name: str, x: torch.Tensor, ema: float) -> None:
+        r = float(x.float().mean())
+        a = 1.0 - (1.0 - ema) ** int(x.numel())
+        self.ema[name] = r if name not in self.ema else (1 - a) * self.ema[name] + a * r
 
     def __call__(
         self,
@@ -8449,6 +8502,7 @@ class getup_path_frontier:
         stand_z: float,
         sensor_name: str,
         step_s: float = 0.5,
+        steps: dict | None = None,
         promote_at: float = 0.5,
         window: int = 256,
         ema: float = 0.02,
@@ -8456,6 +8510,7 @@ class getup_path_frontier:
     ) -> dict[str, float]:
         term = env.event_manager.get_term_cfg(event_name).func
         assert isinstance(term, reset_from_getup_states)
+        steps = {"path": step_s, **(steps or {})}
         if isinstance(env_ids, slice):
             env_ids = torch.arange(env.num_envs, device=env.device)[env_ids]
         ran = env.episode_length_buf[env_ids] > 0  # skip the reset at startup
@@ -8463,24 +8518,35 @@ class getup_path_frontier:
         if len(ids) > 0:
             stood = _getup_standing_score(env, stand_z, 0.05, 0.06, sensor_name)[ids] > 0.5
             band = term.in_band[ids]
-            self.n += int(band.sum())
-            self.ok += int((band & stood).sum())
-            if self.n >= window:
-                self.last_rate = self.ok / self.n
-                if term.frontier_s is not None and self.last_rate >= promote_at:
-                    term.frontier_s = min(term.frontier_s + step_s, term.max_remain_s + step_s)
-                self.n = self.ok = 0
+            for k in term.frontier:
+                c = self.cnt.setdefault(k, [0, 0])
+                b = band == term.kinds.index(k)
+                c[0] += int(b.sum())
+                c[1] += int((b & stood).sum())
+                if c[0] >= window:
+                    self.last_rate[k] = c[1] / c[0]
+                    if self.last_rate[k] >= promote_at:
+                        term.frontier[k] = min(term.frontier[k] + steps.get(k, 0.1), term.max_level[k] + steps.get(k, 0.1))
+                    c[0] = c[1] = 0
             idx = term.index[ids]
             kind = torch.where(idx < 0, -1, term.kind[idx.clamp(min=0)])
             for i, name in [(-1, "standing")] + list(enumerate(term.kinds)):
                 sel = kind == i
                 if sel.any():
-                    r = float(stood[sel].float().mean())
-                    m = int(sel.sum())
-                    a = 1.0 - (1.0 - ema) ** m
-                    self.ema[name] = r if name not in self.ema else (1 - a) * self.ema[name] + a * r
-        out = {"frontier_s": float(term.frontier_s) if term.frontier_s is not None else -1.0,
-               "band_stood": self.last_rate}
+                    self._ema(name, stood[sel], ema)
+            fall = torch.zeros_like(stood)
+            for k in ("push", "stride", "drop"):
+                if k in term.kinds:
+                    fall |= kind == term.kinds.index(k)
+            prone = term.prone[idx.clamp(min=0)]
+            for face, m in (("prone", fall & prone), ("supine", fall & ~prone)):
+                if m.any():
+                    self._ema(f"fall_{face}", stood[m], ema)
+        out: dict[str, float] = {}
+        for k, f in term.frontier.items():
+            key = "frontier_s" if k == "path" else f"frontier_{k}"
+            out[key] = float(f)
+            out["band_stood" if k == "path" else f"band_stood_{k}"] = self.last_rate.get(k, 0.0)
         out.update({f"end_stood_{k}": v for k, v in self.ema.items()})
         return out
 

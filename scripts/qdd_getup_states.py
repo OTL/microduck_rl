@@ -54,7 +54,7 @@ KD_DAMP = 0.5  # controller [motion] damping_kd
 FALL_TILT_DEG, FALL_GYRO, MAX_TILT_DEG = 35.0, 3.0, 50.0  # controller [safety]
 REST_QVEL = 0.1  # max |qvel| to count as lying still (0.2 s)
 SLOW_QVEL = 0.5  # ... or still this slow after 6 s (creeping legs): kept, velocities zeroed
-KINDS = ("push", "stride", "drop", "crouch", "path")
+KINDS = ("push", "stride", "drop", "crouch", "path", "bridge_prone", "bridge_supine")
 KIND_P = (0.3, 0.25, 0.2, 0.25)  # simulated kinds; "path" rows are added on top (--n-path)
 SIM_KINDS = KINDS[:4]
 FALL_KINDS = ("push", "stride", "drop")
@@ -306,6 +306,105 @@ def sample_path_states(path: Path, n: int, seed: int, m: mujoco.MjModel):
     return rows
 
 
+def _yaw_free(quat: np.ndarray) -> np.ndarray:
+    """quat with its heading removed: rotated about world z so that the
+    torso's up axis (body z, horizontal when lying) points along world +x."""
+    w, x, y, z = quat
+    bz = np.array([2 * (x * z + w * y), 2 * (y * z - w * x), 1 - 2 * (x * x + y * y)])
+    yaw = math.atan2(bz[1], bz[0]) if np.hypot(bz[0], bz[1]) > 1e-3 else 0.0
+    q = _quat_mul(_quat_from_axis_angle([0, 0, 1], -yaw), quat)
+    return q / np.linalg.norm(q)
+
+
+def _slerp(a: np.ndarray, b: np.ndarray, t: float) -> np.ndarray:
+    d = float(np.dot(a, b))
+    if d < 0:
+        b, d = -b, -d
+    if d > 0.9995:
+        q = a + t * (b - a)
+        return q / np.linalg.norm(q)
+    th = math.acos(d)
+    return (math.sin((1 - t) * th) * a + math.sin(t * th) * b) / math.sin(th)
+
+
+def face_of(quat: np.ndarray) -> str:
+    """"prone" (chest down) or "supine" (back down), by the body x (forward)
+    axis' world z; side-lying goes to the nearer one."""
+    w, x, y, z = quat
+    return "prone" if 2 * (x * z - w * y) < 0 else "supine"
+
+
+def bridge_state(anchor_q: np.ndarray, fall_q: np.ndarray, alpha: float, m: mujoco.MjModel):
+    """A lying state ``alpha`` of the way from a demo start (``anchor_q``, full
+    qpos) to a real fall (``fall_q``): orientation slerped (headings removed),
+    joints interpolated, dropped onto the floor, 1 s holding those joints
+    (PD), then 1 s damping only like the controller, kept when at rest and
+    still on the same face. Returns a library row or None."""
+    d = mujoco.MjData(m)
+    kp, kd, eff = _gains(m)
+    lo, hi = m.jnt_range[1:, 0].copy(), m.jnt_range[1:, 1].copy()
+    qa, qf = _yaw_free(anchor_q[3:7]), _yaw_free(fall_q[3:7])
+    quat = _slerp(qa, qf, alpha)
+    target = np.clip((1 - alpha) * anchor_q[7:] + alpha * fall_q[7:], lo, hi)
+    for s in (0, 5):
+        target[s + 3] = min(target[s + 3], rc.knee_max(target[s + 2]) - 0.02)
+    d.qpos[3:7] = quat
+    d.qpos[7:] = target
+    d.qpos[2] = 0.5
+    mujoco.mj_forward(m, d)
+    low = min(
+        d.geom_xpos[g, 2] - m.geom_rbound[g]
+        for g in range(m.ngeom)
+        if m.geom_contype[g] and m.geom_bodyid[g] > 0
+    )
+    d.qpos[2] += 0.005 - low
+    face = face_of(quat)
+    t_rest = 0.0
+    for i in range(int(2.0 / DT)):
+        q, qd = d.qpos[7:], d.qvel[6:]
+        tau = kp * (target - q) - kd * qd if i < int(1.0 / DT) else -KD_DAMP * qd
+        d.qfrc_applied[6:] = np.clip(tau, -eff, eff)
+        mujoco.mj_step(m, d)
+        if not np.all(np.isfinite(d.qpos)):
+            return None
+        if i > int(1.0 / DT) and np.abs(d.qvel).max() < REST_QVEL:
+            t_rest += DT
+        else:
+            t_rest = 0.0
+    if t_rest < 0.2 and np.abs(d.qvel).max() > SLOW_QVEL:
+        return None
+    if face_of(d.qpos[3:7]) != face:
+        return None
+    q = d.qpos[7:].copy()
+    if not _knee_ok(q, 0.1):
+        return None
+    return float(d.qpos[2]), d.qpos[3:7].copy(), q, _tilt_deg(d), np.zeros(6), np.zeros(10), float(alpha)
+
+
+def sample_bridge_states(demo_path: Path, falls: list, n: int, seed: int, m: mujoco.MjModel):
+    """n "bridge_prone" / "bridge_supine" rows (n each at most): states between
+    the demo starts (prone get-up, supine roll) and the real falls of that
+    face, alpha ~ U(0, 1) (0 = the demo start, 1 = the real fall)."""
+    rng = np.random.default_rng(seed)
+    dd = np.load(demo_path)
+    Q, demo = dd["qpos"].astype(np.float64), dd["demo"]
+    anchors = {"prone": Q[np.flatnonzero(demo == 0)[0]], "supine": Q[np.flatnonzero(demo == 1)[0]]}
+    by_face = {"prone": [], "supine": []}
+    for z, quat, q in falls:
+        by_face[face_of(quat)].append(np.r_[0.0, 0.0, z, quat, q])
+    rows = []
+    for face, pool in by_face.items():
+        got, tries = 0, 0
+        while got < n and tries < 3 * n and pool:
+            tries += 1
+            f = pool[rng.integers(len(pool))]
+            r = bridge_state(anchors[face], f, float(rng.uniform(0, 1)), m)
+            if r is not None:
+                rows.append((f"bridge_{face}", r))
+                got += 1
+    return rows
+
+
 def _work(args):
     seed, kind = args
     m = build_model()
@@ -320,6 +419,7 @@ def main():
     ap.add_argument("--workers", type=int, default=0)
     ap.add_argument("--n-path", type=int, default=1500, help="states along the demo get-ups")
     ap.add_argument("--demo", default=str(rc.QDD_GETUP_DEMO_NPZ))
+    ap.add_argument("--n-bridge", type=int, default=1500, help="bridge states per face (prone / supine)")
     ap.add_argument(
         "--reuse-sim", default="", help="take the simulated (non-path) rows from this library instead of simulating"
     )
@@ -330,7 +430,7 @@ def main():
         rows = []
         for j in range(len(old["root_z"])):
             k = old_kinds[old["kind"][j]]
-            if k == "path":
+            if k == "path" or k.startswith("bridge_"):
                 continue
             rows.append((k, (float(old["root_z"][j]), old["root_quat"][j], old["joint_pos"][j],
                              float(old["tilt_deg"][j]), old["root_vel"][j], old["joint_vel"][j])))
@@ -343,6 +443,9 @@ def main():
         rows = [(k, r) for k, r in res if r is not None][: a.n]
     if a.n_path > 0:
         rows += [("path", r) for r in sample_path_states(Path(a.demo), a.n_path, a.seed + 7, build_model())]
+    if a.n_bridge > 0:
+        falls = [(r[0], r[1], r[2]) for k, r in rows if k in FALL_KINDS]
+        rows += sample_bridge_states(Path(a.demo), falls, a.n_bridge, a.seed + 11, build_model())
     z = np.array([r[0] for _, r in rows], np.float32)
     quat = np.array([r[1] for _, r in rows], np.float32)
     q = np.array([r[2] for _, r in rows], np.float32)
@@ -350,11 +453,12 @@ def main():
     kind = np.array([KINDS.index(k) for k, _ in rows], np.int8)
     root_vel = np.array([r[4] for _, r in rows], np.float32)
     joint_vel = np.array([r[5] for _, r in rows], np.float32)
-    remain_s = np.array([r[6] if len(r) > 6 else -1.0 for _, r in rows], np.float32)
+    remain_s = np.array([r[6] if len(r) > 6 and k == "path" else -1.0 for k, r in rows], np.float32)
+    alpha = np.array([r[6] if len(r) > 6 and k.startswith("bridge_") else -1.0 for k, r in rows], np.float32)
     Path(a.out).parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
         a.out, root_z=z, root_quat=quat, joint_pos=q, tilt_deg=tilt, kind=kind,
-        root_vel=root_vel, joint_vel=joint_vel, remain_s=remain_s,
+        root_vel=root_vel, joint_vel=joint_vel, remain_s=remain_s, alpha=alpha,
         kinds=np.array(KINDS), joint_names=np.array(rc.QDD_JOINT_NAMES),
     )
     print(f"{len(rows)} states ({len(res) - sum(r is None for _, r in res)} usable of {len(res)}) -> {a.out}")

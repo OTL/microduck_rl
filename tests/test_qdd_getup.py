@@ -64,7 +64,7 @@ def test_getup_state_library():
     assert 0.2 < np.mean(d["tilt_deg"][crouch] < 30.0) < 0.9
     assert np.all(d["root_z"][crouch] < rc.STAND_BASE_Z)
     # every kind represented
-    assert kinds == ["push", "stride", "drop", "crouch", "path"]
+    assert kinds == ["push", "stride", "drop", "crouch", "path", "bridge_prone", "bridge_supine"]
     for i, k in enumerate(kinds):
         assert (d["kind"] == i).sum() > 0.05 * n, k
     # velocities: zero for the simulated (resting) kinds, stored for path states
@@ -359,26 +359,27 @@ def test_getup_path_frontier_moves_back_only_when_band_stands(getup_train_env, m
     monkeypatch.setattr(
         microduck_mdp, "_getup_standing_score", lambda env, *a, **k: torch.full((env.num_envs,), stood["v"])
     )
+    P = term.kinds.index("path")
     term.frontier_s = 1.0
-    fn.n = fn.ok = 0
+    fn.cnt = {}
     env.episode_length_buf[:] = 10
     term.index[:] = int(torch.nonzero(term.is_path)[0, 0])
 
     # band starts that end lying: the frontier stays
     for _ in range(rounds):
-        term.in_band[:] = True
+        term.in_band[:] = P
         out = fn(env, ids, **cur.params)
     assert term.frontier_s == 1.0 and out["band_stood"] == 0.0
     # starts outside the band do not count, even standing
     stood["v"] = 1.0
-    fn.n = fn.ok = 0
-    term.in_band[:] = False
+    fn.cnt = {}
+    term.in_band[:] = -1
     for _ in range(rounds):
         fn(env, ids, **cur.params)
     assert fn.n == 0 and term.frontier_s == 1.0
     # band starts that end standing: one step back per window
     for _ in range(rounds):
-        term.in_band[:] = True
+        term.in_band[:] = P
         out = fn(env, ids, **cur.params)
     assert term.frontier_s == 1.0 + cur.params["step_s"]
     assert out["frontier_s"] == term.frontier_s and out["end_stood_path"] > 0.5
@@ -388,3 +389,42 @@ def test_getup_path_frontier_moves_back_only_when_band_stands(getup_train_env, m
     fn(env, ids, **cur.params)
     assert fn.n == 0
     term.frontier_s = 1.0
+
+
+def test_getup_library_bridges():
+    d = np.load(rc.QDD_GETUP_STATES_NPZ)
+    kinds = list(d["kinds"])
+    w, x, y, z = d["root_quat"].T
+    prone = 2 * (x * z - w * y) < 0
+    for face in ("prone", "supine"):
+        sel = d["kind"] == kinds.index(f"bridge_{face}")
+        assert sel.sum() > 500, face
+        a = d["alpha"][sel]
+        assert a.min() >= 0.0 and a.max() <= 1.0 and a.min() < 0.05 and a.max() > 0.95
+        assert np.all(prone[sel] == (face == "prone"))  # still on the same face
+    assert np.all(d["alpha"][d["kind"] < kinds.index("bridge_prone")] == -1.0)
+
+
+def test_getup_bridge_frontier_moves_on_its_own(getup_train_env, monkeypatch):
+    env = getup_train_env
+    term = env.event_manager.get_term_cfg("reset_getup").func
+    cur = env.curriculum_manager.get_term_cfg("path_frontier")
+    fn = cur.func
+    ids = torch.arange(env.num_envs)
+    monkeypatch.setattr(microduck_mdp, "_getup_standing_score", lambda env, *a, **k: torch.ones(env.num_envs))
+    start = dict(term.frontier)
+    fn.cnt = {}
+    env.episode_length_buf[:] = 10
+    bp = term.kinds.index("bridge_prone")
+    term.index[:] = int(torch.nonzero(term.kind == bp)[0, 0])
+    for _ in range(cur.params["window"] // env.num_envs + 1):
+        term.in_band[:] = bp
+        out = fn(env, ids, **cur.params)
+    assert term.frontier["bridge_prone"] == pytest.approx(start["bridge_prone"] + cur.params["steps"]["bridge_prone"])
+    assert term.frontier["bridge_supine"] == start["bridge_supine"]
+    assert term.frontier["path"] == start["path"]
+    assert "frontier_bridge_prone" in out and "end_stood_bridge_prone" in out
+    # bridge draws respect the frontier
+    idx = term._sample(5000, {"bridge_prone": 1.0}, "cpu")
+    assert torch.all(term.level[idx] <= term.frontier["bridge_prone"] + 1e-6)
+    term.frontier.update(start)
