@@ -25,6 +25,7 @@ beyondmimic_motions/
 artifacts/
 *.npz
 !src/mjlab_microduck/robot/qdd_biped/getup_states.npz
+!src/mjlab_microduck/robot/qdd_biped/getup_demo_traj.npz
 
 src/mjlab_microduck/robot/microduck.bak/*
 src/mjlab_microduck/robot/microduck_test/*

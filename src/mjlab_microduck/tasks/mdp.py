@@ -8206,7 +8206,8 @@ class reset_from_getup_states:
     """RESET event: start lying on the floor in a resting pose from the fallen-
     state library (scripts/qdd_getup_states.py: falls the real controller
     produces, simulated to rest in plain MuJoCo), with a random yaw, at the env
-    origin, at rest. ``standing_prob`` of the resets start standing in the
+    origin, at rest (or, for "path" states, with their stored velocities).
+    ``standing_prob`` of the resets start standing in the
     default pose instead (the policy must also just keep standing, and a
     hand-over to walking starts from there). ``kind_probs`` weighs the library
     kinds ("push", "stride", "drop"); None = as stored."""
@@ -8223,6 +8224,11 @@ class reset_from_getup_states:
         self.root_quat = torch.tensor(data["root_quat"], dtype=torch.float32, device=dev)
         self.joint_pos = torch.tensor(data["joint_pos"][:, order], dtype=torch.float32, device=dev)
         self.kind = torch.tensor(data["kind"], dtype=torch.long, device=dev)
+        n = len(data["root_z"])
+        rv = data["root_vel"] if "root_vel" in data.files else np.zeros((n, 6), np.float32)
+        jv = data["joint_vel"][:, order] if "joint_vel" in data.files else np.zeros((n, len(order)), np.float32)
+        self.root_vel = torch.tensor(rv, dtype=torch.float32, device=dev)  # world frame (lin, ang)
+        self.joint_vel = torch.tensor(jv, dtype=torch.float32, device=dev)
         self.kinds = [str(k) for k in data["kinds"]]
         self.n = self.root_z.shape[0]
         # last sampled library index per env (-1 = standing start); for metrics/tests
@@ -8271,6 +8277,14 @@ class reset_from_getup_states:
         z = self.root_z[idx] + z_lift
         joint_pos = self.joint_pos[idx].clone()
 
+        # library velocities (path states), rotated by the same yaw
+        cy, sy = torch.cos(yaw), torch.sin(yaw)
+        def _rot(v):
+            return torch.stack([cy * v[:, 0] - sy * v[:, 1], sy * v[:, 0] + cy * v[:, 1], v[:, 2]], dim=1)
+        lin = _rot(self.root_vel[idx, :3])
+        ang = _rot(self.root_vel[idx, 3:])
+        joint_vel = self.joint_vel[idx].clone()
+
         default_q = asset.data.default_joint_pos[env_ids]
         stand_z = asset.data.default_root_state[env_ids, 2]
         quat = torch.where(standing.unsqueeze(1), q_yaw, quat)
@@ -8281,8 +8295,12 @@ class reset_from_getup_states:
         root[:, :3] = env.scene.env_origins[env_ids]
         root[:, 2] += z
         root[:, 3:7] = quat
+        st = standing.unsqueeze(1)
+        root[:, 7:10] = torch.where(st, 0.0, lin)
+        root[:, 10:13] = torch.where(st, 0.0, ang)
+        joint_vel = torch.where(st, 0.0, joint_vel)
         asset.write_root_state_to_sim(root, env_ids=env_ids)
-        asset.write_joint_state_to_sim(joint_pos, torch.zeros_like(joint_pos), env_ids=env_ids)
+        asset.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids)
 
 
 def _quat_mul_wxyz(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:

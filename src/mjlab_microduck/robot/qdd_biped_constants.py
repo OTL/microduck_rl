@@ -167,6 +167,8 @@ GETUP_FLOOR_BIT = 2
 # Fallen-state library (scripts/qdd_getup_states.py): resting poses after falls.
 QDD_GETUP_POLICY_IO_JSON: Path = Path(os.path.dirname(__file__)) / "qdd_biped" / "policy_io_getup.json"
 QDD_GETUP_STATES_NPZ: Path = Path(os.path.dirname(__file__)) / "qdd_biped" / "getup_states.npz"
+# Get-up motions found by scripts/qdd_getup_search/ (qpos / qvel every 20 ms).
+QDD_GETUP_DEMO_NPZ: Path = Path(os.path.dirname(__file__)) / "qdd_biped" / "getup_demo_traj.npz"
 MOTOR_VISUAL_RGBA = (0.15, 0.35, 0.75, 1.0)
 # Rabbit face + hatch on top of the torso (robot/model.py TORSO_ITEMS "rabbit"):
 # visual box centre / half sizes in the torso frame.

@@ -63,8 +63,15 @@ EPISODE_LENGTH_S = 8.0
 # Action = offset from the default pose x scale. Getting up needs the whole
 # joint range (hip pitch -100 deg, knee 120 deg vs default -22.5 / 45 deg):
 # with the walking 0.25 rad that is an action of ~5; 0.5 halves it.
-GETUP_ACTION_SCALE = 0.5
+# getup1/2 (0.5) never got up from a real fall; the get-up found by the keyframe
+# search (scripts/qdd_getup_search/) drives hip pitch to -100 deg (action
+# ~2.7 at 0.5): 0.75 makes it reachable with the usual action magnitudes.
+GETUP_ACTION_SCALE = 0.75
 STANDING_START_PROB = 0.1
+# Start mix (library kinds). getup2: crouch 31 % stood, real falls 0 %. "path"
+# = states along the found get-up WITH velocities (reverse curriculum on a
+# motion known to work), so it gets the largest share.
+GETUP_KIND_PROBS = {"push": 0.2, "stride": 0.15, "drop": 0.1, "crouch": 0.15, "path": 0.4}
 
 # Standing (getup_standing): torso height at the default pose = STAND_BASE_Z.
 STAND_UP_SCALE = 0.05  # exp(-(1 - cos tilt) / s): 10 deg -> 0.74, 20 deg -> 0.30
@@ -80,7 +87,7 @@ STAND_POSE_WEIGHT = 1.5
 STAND_POSE_STD = 0.25  # rad, sqrt of the summed squared joint errors
 
 # Violence / hardware.
-TORSO_ANG_VEL_LIMIT = 4.0  # rad/s, cost above (falling over is ~3 rad/s)
+TORSO_ANG_VEL_LIMIT = 7.0  # rad/s, cost above (the found get-up swings the torso at up to 6 rad/s)
 TORSO_ANG_VEL_WEIGHT = -0.5
 BODY_IMPACT_THRESHOLD = 150.0  # N per part; standing on two soles is ~65 N
 BODY_IMPACT_WEIGHT = -0.5
@@ -199,7 +206,7 @@ def make_qdd_biped_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             params={
                 "states_path": str(QDD_GETUP_STATES_NPZ),
                 "standing_prob": STANDING_START_PROB,
-                "kind_probs": None,
+                "kind_probs": GETUP_KIND_PROBS,
             },
         ),
         **cfg.events,

@@ -55,17 +55,24 @@ def test_getup_state_library():
     assert np.allclose(np.linalg.norm(d["root_quat"], axis=1), 1.0, atol=1e-4)
     kinds = [str(k) for k in d["kinds"]]
     # falls: lying, not standing (torso low and tilted)
-    fall = d["kind"] != kinds.index("crouch")
+    fall = np.isin(d["kind"], [kinds.index(k) for k in ("push", "stride", "drop")])
     assert np.median(d["tilt_deg"][fall]) > 60.0
     assert np.all(d["root_z"][fall] < 0.3)
     # crouch (reverse curriculum): many still upright-ish, none standing tall
-    crouch = ~fall
+    crouch = d["kind"] == kinds.index("crouch")
     assert 0.2 < np.mean(d["tilt_deg"][crouch] < 30.0) < 0.9
     assert np.all(d["root_z"][crouch] < rc.STAND_BASE_Z)
     # every kind represented
-    assert kinds == ["push", "stride", "drop", "crouch"]
+    assert kinds == ["push", "stride", "drop", "crouch", "path"]
     for i, k in enumerate(kinds):
         assert (d["kind"] == i).sum() > 0.1 * n, k
+    # velocities: zero for the simulated (resting) kinds, stored for path states
+    assert d["root_vel"].shape == (n, 6) and d["joint_vel"].shape == (n, 10)
+    path = d["kind"] == kinds.index("path")
+    assert np.all(d["root_vel"][~path] == 0) and np.all(d["joint_vel"][~path] == 0)
+    assert np.abs(d["joint_vel"][path]).max() > 1.0
+    # path states span lying to standing
+    assert d["root_z"][path].min() < 0.1 and d["root_z"][path].max() > 0.33
     # within the joint ranges and the knee stop (tolerances as in the generator)
     m = rc.get_qdd_biped_spec().compile()
     lo = np.array([m.joint(j).range[0] for j in rc.QDD_JOINT_NAMES])
@@ -176,9 +183,11 @@ def test_getup_reset_places_library_states(getup_env):
     assert np.allclose(z, lib["root_z"][idx] + 0.003, atol=5e-3)
     q = robot.data.joint_pos.cpu().numpy()
     assert np.allclose(q, lib["joint_pos"][idx], atol=1e-4)
+    qd = robot.data.joint_vel.cpu().numpy()
+    assert np.allclose(qd, lib["joint_vel"][idx], atol=1e-4)
     # lying robots score ~0 standing, and the first progress step pays 0
     st = microduck_mdp.getup_standing(env, rc.STAND_BASE_Z, "feet_ground_contact")
-    assert torch.all(st[lib["kind"][idx] != 3] < 0.1)  # falls (crouch starts may be up)
+    assert torch.all(st[lib["kind"][idx] < 3] < 0.1)  # falls (crouch / path starts may be up)
     assert any(k.startswith("Metrics/getup_stood_frac_") for k in env.extras["log"])
 
 
@@ -258,3 +267,18 @@ def test_rough_terrain_levels_follow_survival():
         assert "stairs" in out and "flat" in out
     finally:
         env.close()
+
+
+def test_getup_path_mirror_is_an_involution():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("gen", "scripts/qdd_getup_states.py")
+    gen = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gen)
+    rng = np.random.default_rng(1)
+    q = rng.normal(size=17)
+    q[3:7] /= np.linalg.norm(q[3:7])
+    v = rng.normal(size=16)
+    q2, v2 = gen._mirror(*gen._mirror(q, v))
+    assert np.allclose(q2, q) and np.allclose(v2, v)
+    qm, _ = gen._mirror(q, v)
+    assert np.allclose(qm[7:12], q[12:17] * [-1, -1, 1, 1, 1])  # legs swapped, yaw / roll negated

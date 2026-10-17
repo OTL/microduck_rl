@@ -88,6 +88,16 @@ uv run python scripts/qdd_getup_states.py --n 3000
 uv run python -m mjlab_microduck.tasks.qdd_biped_getup_env_cfg   # policy_io_getup.json
 ```
 
+### 学習の経過と、見つけた起き上がり方
+
+- getup1（3000 反復、行動の倍率 0.5）：立てた割合 15%。ほぼ最初から立っている回の分だけ。
+- getup2（しゃがみ姿勢を開始に追加、膝の打ち切り 0.6 rad）：しゃがみからは 31% 立てたが、本当に倒れた姿勢（push・stride・drop）からは 0%。
+- そこで `scripts/qdd_getup_search/`（素の MuJoCo、関節目標のキーフレームを CEM で探索）で、今の関節範囲で立てるかを確かめた。
+  - うつ伏せ → 立つ：見つかった。片脚を後ろに大きく蹴り上げて体を起こし、開脚の姿勢から脚をそろえて立つ。約 4 秒、トルク 11 Nm 以内、関節の速さ 12 rad/s 以内、胴の回転は最大 6 rad/s。
+  - 仰向け → 直接立つ：見つからなかった。仰向け → うつ伏せへの寝返りは見つかった。
+  - この動きを `robot/qdd_biped/getup_demo_traj.npz`（20 ms ごとの qpos / qvel）に保存。
+- getup3：ライブラリに「path」（見つけた動きの途中の姿勢 1500 件。速度つき、左右反転あり、少しノイズ）を加え、開始の割合を path 40%・push 20%・stride 15%・crouch 15%・drop 10%（ほかに立った姿勢 10%）にした。行動の倍率は 0.75（股関節を -100° まで動かせるように）、胴の回転の罰は 7 rad/s から。
+
 ### わかっていないこと
 
 腕が無いので、すべての寝姿勢から起き上がれるか（特にあお向け）は、学習してみるまでわからない。`Metrics/getup_stood_frac`（立てている環境の割合）を見る。
