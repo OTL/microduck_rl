@@ -85,7 +85,11 @@ TORSO_ANG_VEL_WEIGHT = -0.5
 BODY_IMPACT_THRESHOLD = 150.0  # N per part; standing on two soles is ~65 N
 BODY_IMPACT_WEIGHT = -0.5
 BODY_FRICTION_RANGE = (0.3, 1.0)  # PA12 / TPU on tiles .. carpet
-KNEE_LIMIT_TERMINATION_TOL = 0.3  # rad (lying poses can sit near the stop)
+# Knee past knee_max(hip_pitch): the knee_limit COST (-10 / rad / step) keeps it
+# near the stop; the episode ends only far beyond it. Run getup1 (0.3 rad) ended
+# ~1/3 of the episodes here before any get-up was found (stood 15 %): a deep
+# knee fold is what getting up needs, so the explorer must survive touching it.
+KNEE_LIMIT_TERMINATION_TOL = 0.6  # rad
 
 # Play / export video: these library states in this order, one per env.
 PLAY_EPISODE_S = 6.0

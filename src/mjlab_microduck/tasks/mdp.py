@@ -8344,8 +8344,27 @@ def getup_standing(
     product: lying, kneeling or a tilted crouch each collapse it."""
     r = _getup_standing_score(env, stand_z, up_scale, z_std, sensor_name)
     env.extras["log"]["Metrics/getup_standing"] = r.mean()
-    env.extras["log"]["Metrics/getup_stood_frac"] = (r > 0.5).float().mean()
+    stood = (r > 0.5).float()
+    env.extras["log"]["Metrics/getup_stood_frac"] = stood.mean()
+    _log_stood_by_start_kind(env, stood)
     return torch.nan_to_num(r, nan=0.0)
+
+
+def _log_stood_by_start_kind(env: ManagerBasedRlEnv, stood: torch.Tensor) -> None:
+    """Metrics/getup_stood_frac_<kind>: the share standing among the envs that
+    started from that library kind ("standing" = standing starts), to see which
+    starts the policy can get up from."""
+    try:
+        term = env.event_manager.get_term_cfg("reset_getup").func
+    except (KeyError, ValueError, AttributeError):
+        return
+    if not isinstance(term, reset_from_getup_states):
+        return
+    kind = torch.where(term.index < 0, -1, term.kind[term.index.clamp(min=0)])
+    for i, name in [(-1, "standing")] + list(enumerate(term.kinds)):
+        sel = kind == i
+        if sel.any():
+            env.extras["log"][f"Metrics/getup_stood_frac_{name}"] = stood[sel].mean()
 
 
 def getup_stand_still(

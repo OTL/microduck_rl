@@ -53,11 +53,17 @@ def test_getup_state_library():
     assert n >= 1000
     assert d["root_quat"].shape == (n, 4) and d["joint_pos"].shape == (n, 10)
     assert np.allclose(np.linalg.norm(d["root_quat"], axis=1), 1.0, atol=1e-4)
-    # lying, not standing: torso low and tilted
-    assert np.median(d["tilt_deg"]) > 60.0
-    assert np.all(d["root_z"] < 0.3)
-    # every kind represented
     kinds = [str(k) for k in d["kinds"]]
+    # falls: lying, not standing (torso low and tilted)
+    fall = d["kind"] != kinds.index("crouch")
+    assert np.median(d["tilt_deg"][fall]) > 60.0
+    assert np.all(d["root_z"][fall] < 0.3)
+    # crouch (reverse curriculum): many still upright-ish, none standing tall
+    crouch = ~fall
+    assert 0.2 < np.mean(d["tilt_deg"][crouch] < 30.0) < 0.9
+    assert np.all(d["root_z"][crouch] < rc.STAND_BASE_Z)
+    # every kind represented
+    assert kinds == ["push", "stride", "drop", "crouch"]
     for i, k in enumerate(kinds):
         assert (d["kind"] == i).sum() > 0.1 * n, k
     # within the joint ranges and the knee stop (tolerances as in the generator)
@@ -172,7 +178,8 @@ def test_getup_reset_places_library_states(getup_env):
     assert np.allclose(q, lib["joint_pos"][idx], atol=1e-4)
     # lying robots score ~0 standing, and the first progress step pays 0
     st = microduck_mdp.getup_standing(env, rc.STAND_BASE_Z, "feet_ground_contact")
-    assert torch.all(st < 0.1)
+    assert torch.all(st[lib["kind"][idx] != 3] < 0.1)  # falls (crouch starts may be up)
+    assert any(k.startswith("Metrics/getup_stood_frac_") for k in env.extras["log"])
 
 
 def test_getup_rewards_standing_robot(getup_env):
