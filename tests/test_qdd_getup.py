@@ -502,3 +502,26 @@ def test_getup_attempt_taxes_start_at_zero(getup_train_env):
     for name in RAMPED_PENALTIES:
         assert env.reward_manager.get_term_cfg(name).weight == 0.0, name
     assert env.reward_manager.get_term_cfg("demo_tracking").weight > 0
+
+
+def test_demo_tracking_waits_for_prep():
+    """getup9: a real fall (bridge alpha 1) starts following the demo after the
+    prep ramp, a bridge at the demo start (alpha 0) at once."""
+    from mjlab.envs import ManagerBasedRlEnv
+
+    from mjlab_microduck.tasks.qdd_biped_getup_env_cfg import DEMO_PREP_S
+
+    cfg = make_qdd_biped_getup_env_cfg(play=False)
+    cfg.scene.num_envs = 4
+    env = ManagerBasedRlEnv(cfg=cfg, device="cpu")
+    tr = env.reward_manager.get_term_cfg("demo_tracking").func
+    assert isinstance(tr, microduck_mdp.getup_demo_tracking)
+    term = tr.term
+    prep = int(round(DEMO_PREP_S / env.step_dt))
+    k = term.kinds.index("bridge_prone")
+    far = torch.nonzero((term.kind == k) & (term.alpha > 0.99))[0, 0]
+    near = torch.nonzero((term.kind == k) & (term.alpha < 0.01))[0, 0]
+    assert int(tr.state_off[far]) <= -prep + 1
+    assert int(tr.state_off[near]) == 0
+    fall = torch.nonzero(term.kind == term.kinds.index("push"))[0, 0]
+    assert int(tr.state_off[fall]) == -prep

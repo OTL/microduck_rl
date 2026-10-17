@@ -61,7 +61,9 @@ TASK_ID = "Mjlab-Getup-QddBiped"
 
 # getup4: 12 s (was 8). The found supine get-up (roll to the front, then the
 # prone get-up) takes ~10 s at demo speed.
-EPISODE_LENGTH_S = 12.0
+# getup9: 16 s. The robust demos (scripts/qdd_getup_search/robust*.py) start
+# with a 1 s ramp of the joints to a prep pose; supine is ~12.6 s in all.
+EPISODE_LENGTH_S = 16.0
 # Action = offset from the default pose x scale. Getting up needs the whole
 # joint range (hip pitch -100 deg, knee 120 deg vs default -22.5 / 45 deg):
 # with the walking 0.25 rad that is an action of ~5; 0.5 halves it.
@@ -133,6 +135,12 @@ DEMO_TRACK_LATE_WEIGHT = 1.0
 DEMO_TRACK_LATE_ITER = 1500
 DEMO_TRACK_STD_Q = 2.5  # rad, sqrt of the summed squared joint errors
 DEMO_TRACK_STD_G = 1.0  # torso gravity direction (unit vector) error
+# getup9: the demos are the robust get-ups (scripts/qdd_getup_search/robust.py,
+# robust_supine.py, export_robust.py). Open loop in mjlab they stand from 49/64
+# real falls (64/64 with one retry; train DR: 58/64 within three tries). They
+# begin in a prep pose: a real fall first ramps its joints there for 1 s, so a
+# lying start follows the demo after alpha x DEMO_PREP_S.
+DEMO_PREP_S = 1.0
 # Attempt taxes off while the get-up is discovered (AGENTS.md). Measured on the
 # lying starts with the initial noise (CPU, getup7 cfg): torso_ang_vel -0.43,
 # knee_limit -0.15, self_collisions -0.07 per episode against +0.03 from
@@ -154,7 +162,7 @@ BODY_FRICTION_RANGE = (0.3, 1.0)  # PA12 / TPU on tiles .. carpet
 KNEE_LIMIT_TERMINATION_TOL = 0.6  # rad
 
 # Play / export video: these library states in this order, one per env.
-PLAY_EPISODE_S = 10.0
+PLAY_EPISODE_S = 14.0
 
 
 def make_qdd_biped_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
@@ -233,7 +241,7 @@ def make_qdd_biped_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.rewards["demo_tracking"] = RewardTermCfg(
         func=microduck_mdp.getup_demo_tracking,
         weight=DEMO_TRACK_WEIGHT,
-        params={"std_q": DEMO_TRACK_STD_Q, "std_g": DEMO_TRACK_STD_G},
+        params={"std_q": DEMO_TRACK_STD_Q, "std_g": DEMO_TRACK_STD_G, "prep_s": DEMO_PREP_S},
     )
     cfg.rewards["torso_ang_vel"] = RewardTermCfg(
         func=microduck_mdp.torso_ang_vel_excess,

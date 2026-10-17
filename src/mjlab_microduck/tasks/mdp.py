@@ -8243,6 +8243,7 @@ class reset_from_getup_states:
         al = data["alpha"] if "alpha" in data.files else np.full(n, -1.0, np.float32)
         df = data["demo_frame"] if "demo_frame" in data.files else np.full(n, -1, np.int32)
         self.demo_frame = torch.tensor(df, dtype=torch.long, device=dev)  # path: demo npz row
+        self.alpha = torch.tensor(al, dtype=torch.float32, device=dev)  # bridge_*: 0 demo start .. 1 real fall
         self.remain_s = torch.tensor(rs, dtype=torch.float32, device=dev)
         # curriculum level per state: path = remain_s, bridge_* = alpha
         self.level = torch.where(
@@ -8566,7 +8567,9 @@ class getup_demo_tracking:
     crouch starts. It gives the start of the get-up (0.6 s of flipping over
     that raise neither height nor uprightness, so getup_progress pays nothing
     for them) a signal: getup4/5 stood from states already moving along the
-    demo, never from lying still."""
+    demo, never from lying still. ``prep_s``: a lying start begins following
+    after alpha x prep_s (real falls: alpha 1), the time the robust demos take
+    to bring the joints of a real fall to their prep pose."""
 
     def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
         from mjlab_microduck.robot import qdd_biped_constants as rc
@@ -8617,6 +8620,15 @@ class getup_demo_tracking:
             start = torch.tensor([int(f0[0]), int(f1[0])], device=dev)
             rid = torch.where(p, d, rid)
             off = torch.where(p, fr - start[d.clamp(0, 1)], off)
+        # getup9: the robust demos start in a prep pose that a real fall reaches
+        # by ramping its joints there (1 s at demo speed; a bridge state alpha of
+        # the way to the fall needs alpha of that). Start following the demo
+        # after that time instead of from the first step.
+        prep = int(round(cfg.params.get("prep_s", 0.0) / env.step_dt))
+        if prep > 0:
+            lying = (~p) & (~none)
+            alpha = torch.where(term.alpha >= 0, term.alpha, torch.ones_like(term.alpha))
+            off = torch.where(lying, -(alpha * prep).round().long(), off)
         self.state_ref = torch.where(none, -1, rid)
         self.state_off = off
         self.term = term
@@ -8628,6 +8640,7 @@ class getup_demo_tracking:
         std_g: float = 0.5,
         demo_path: str | None = None,
         event_name: str = "reset_getup",
+        prep_s: float = 0.0,
         asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
     ) -> torch.Tensor:
         asset: Entity = env.scene[asset_cfg.name]
