@@ -113,6 +113,12 @@ SOLE_SCAN_SITES = ("l_sole_scan_site", "r_sole_scan_site")
 # episode without a fall and with a mean xy velocity error below this; one row
 # down after a fall. (mjlab's distance rule demoted even the flat column: rough1.)
 TERRAIN_UP_MAX_ERR_XY = 0.2  # m/s
+# rough2: stairs / grid / flat climbed to level 5-6, slope / bumps / waves
+# stayed at ~0 with a mean xy error of 0.42 m/s. Standing still at level 0 the
+# robot already slides ~0.14 m/s on these height-field columns (and 0.03 on
+# grid): the walking error there is larger at any level, so they get a looser
+# bar. Falls still move them down.
+TERRAIN_UP_MAX_ERR_XY_BY_TYPE = {"slope": 0.4, "bumps": 0.4, "waves": 0.4}
 
 # Play (export / video): terrain levels for the fixed command schedule.
 PLAY_TERRAIN_ROWS = 4
@@ -183,7 +189,11 @@ def make_qdd_biped_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     if not play:
         cfg.curriculum["terrain_levels"] = CurriculumTermCfg(
             func=microduck_mdp.qdd_terrain_levels_survival,
-            params={"command_name": "twist", "max_err_xy": TERRAIN_UP_MAX_ERR_XY},
+            params={
+                "command_name": "twist",
+                "max_err_xy": TERRAIN_UP_MAX_ERR_XY,
+                "max_err_xy_by_type": TERRAIN_UP_MAX_ERR_XY_BY_TYPE,
+            },
         )
 
     return cfg

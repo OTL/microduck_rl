@@ -8593,10 +8593,12 @@ def qdd_terrain_levels_survival(
     command_name: str = "twist",
     max_err_xy: float = 0.2,
     min_episode_frac: float = 0.95,
+    max_err_xy_by_type: dict | None = None,
 ) -> dict[str, torch.Tensor]:
     """CURRICULUM: per reset env, one row up if it ran (nearly) the whole episode
     without a failure termination and its mean xy velocity error was below
-    ``max_err_xy`` m/s; one row down if a failure termination (fall, ground
+    ``max_err_xy`` m/s (``max_err_xy_by_type[<sub-terrain name>]`` for the
+    columns listed there); one row down if a failure termination (fall, ground
     contact, ...) ended it. Logs the mean / max level and the mean level per
     terrain type, like terrain_levels_vel."""
     terrain = env.scene.terrain
@@ -8611,7 +8613,13 @@ def qdd_terrain_levels_survival(
         # error_vel_xy accumulates |err| / (max resampling time / step_dt) per step
         max_cmd_steps = term.cfg.resampling_time_range[1] / env.step_dt
         err_xy = term.metrics["error_vel_xy"][env_ids] * max_cmd_steps / steps
-        move_up = ~failed & full & (err_xy < max_err_xy)
+        limit = torch.full_like(err_xy, max_err_xy)
+        if max_err_xy_by_type:
+            names = list(gen.sub_terrains.keys())
+            types = terrain.terrain_types[env_ids]
+            for name, v in max_err_xy_by_type.items():
+                limit[types == names.index(name)] = float(v)
+        move_up = ~failed & full & (err_xy < limit)
         move_down = failed & ~move_up
         terrain.update_env_origins(env_ids, move_up, move_down)
 

@@ -266,6 +266,17 @@ def test_rough_terrain_levels_follow_survival():
         out = microduck_mdp.qdd_terrain_levels_survival(env, ids)
         assert terrain.terrain_levels.tolist() == [4, 2, 3, 3, 4, 4]
         assert "stairs" in out and "flat" in out
+        # looser bar per column: an error of 0.3 m/s moves up on slope, not on flat
+        names = list(terrain.cfg.terrain_generator.sub_terrains.keys())
+        terrain.terrain_levels[:] = 3
+        env.termination_manager._terminated_buf[:] = False
+        env.episode_length_buf[:] = env.max_episode_length
+        max_cmd_steps = term.cfg.resampling_time_range[1] / env.step_dt
+        term.metrics["error_vel_xy"][:] = 0.3 * env.max_episode_length / max_cmd_steps
+        terrain.terrain_types[:3] = names.index("slope")
+        terrain.terrain_types[3:] = names.index("flat")
+        microduck_mdp.qdd_terrain_levels_survival(env, ids, max_err_xy_by_type={"slope": 0.4})
+        assert terrain.terrain_levels.tolist() == [4, 4, 4, 3, 3, 3]
     finally:
         env.close()
 
