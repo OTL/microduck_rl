@@ -16,7 +16,7 @@ One skill execution per env from the standing pose (no RSI). Per env:
     (GIM6010-8: tau w + 1.5 R (tau / (s Kt))^2, GIM3510-8: tau w / 0.7; / V), peak of the
     5 ms average, with the env's randomised bus voltage V and motor strength s (bus_a; the
     earlier fixed 22 V / s = 1 value is bus_a_22)
-  - the env's domain randomisation draw (dr: bus voltage, strength, Kp scales, torso CoM)
+  - the env's domain randomisation draw (dr: bus voltage, strength, Kp scales)
   - falls (termination before the end), torso pitch change in flight, final pose error
     (max |q - standing| and torso tilt one step before the end)
 """
@@ -101,12 +101,6 @@ def run(onnx_path: str, play: bool, n_envs: int, seed: int = 0) -> dict:
             if nm.endswith(("hip_pitch", "knee", "ankle_pitch")):
                 dr["kp_" + nm] = (a.stiffness[:, j] / a.default_stiffness[:, j]).clone()
     dr.update(env_vs)
-    try:
-        tid = robot.indexing.body_ids[0]
-        dr["torso_com_x"] = (env.sim.model.body_ipos[:, tid, 0] - env.sim.get_default_field("body_ipos")[tid, 0]).clone()
-        dr["torso_com_z"] = (env.sim.model.body_ipos[:, tid, 2] - env.sim.get_default_field("body_ipos")[tid, 2]).clone()
-    except Exception:  # noqa: BLE001  (diagnostic only)
-        pass
     n = sk.n
     com_stand = None
     rec = {k: [] for k in ("com_z", "com_vz", "air", "fz", "sole_z", "pitch")}
