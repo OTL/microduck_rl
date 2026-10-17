@@ -126,8 +126,10 @@ REF_RSI_FOCUS_FRACTION = 0.7  # ... and of those, in the crouch just before the 
 REF_RSI_FOCUS_LEAD_S = 0.5  # focus window = [push start - this, push start - 0.02 s]
 REF_TERMINATION_WEIGHT = -50.0  # x dt (10 ms) = -0.5 per fall
 REF_RESIDUAL_WEIGHT = 0.05  # |a|^2 cost
-REF_BUS_THRESHOLD_A = 20.0  # bus current cost above this (LM5069 trips at 32-41 A)
-REF_BUS_WEIGHT = 0.05  # x relu(I - 20 A)^2, I = largest over the physics substeps of the step
+REF_BUS_THRESHOLD_A = 18.0  # bus current cost above this (LM5069 trips at 32-41 A)
+# x relu(I - 18 A)^2, I = largest over the physics substeps of the step. hop3 run1 with 0.05 / 20 A:
+# 33 A mean / 40 A max under domain randomisation (push-off); run2: 0.25 / 18 A
+REF_BUS_WEIGHT = 0.25
 FOOT_CLEARANCE_CAP = 1.25  # foot clearance reward saturates at 1.25 x the table's plan
 REF_RESIDUAL_GAIN_START = 0.5
 REF_RESIDUAL_RAMP_ITERS = 300
