@@ -96,8 +96,8 @@
     "joint_tracking": 2.0,
     "torso_orientation": 1.5,
     "feet_contact": 2.0,
-    "flight_height": 2.0,
+    "flight_height": 0.5,
     "landing_load": 1.0,
-    "foot_clearance": 5.0
+    "foot_clearance": 8.0
   }
 }

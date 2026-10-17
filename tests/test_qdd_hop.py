@@ -297,7 +297,7 @@ def test_hop_env_physics_actuators_and_terms(hop_env):
     assert fh is not None and fh.shape[2] == 4
     assert w["residual_l2"] < 0 and w["bus_current"] < 0 and w["termination"] == pytest.approx(-50.0)
     # the soles are the height objective (foot clearance), the CoM height tracking stays smaller
-    assert w["foot_clearance"] == pytest.approx(5.0) and w["flight_height"] == pytest.approx(2.0)
+    assert w["foot_clearance"] == pytest.approx(8.0) and w["flight_height"] == pytest.approx(0.5)
     assert env.reward_manager.get_term_cfg("foot_clearance").params["target_m"] == pytest.approx(
         env.command_manager.get_term("skill").spec["_table"]["meta"]["foot_clear_m"])
 
