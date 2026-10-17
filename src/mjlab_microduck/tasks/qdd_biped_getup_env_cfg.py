@@ -55,7 +55,7 @@ from mjlab_microduck.tasks.qdd_biped_velocity_env_cfg import (
     NUM_STEPS_PER_ENV,
     make_qdd_biped_velocity_env_cfg,
 )
-from mjlab_microduck.tasks.symmetry import QDD_SYMMETRY_CFG, PpoWithSymmetryCfg
+from mjlab_microduck.tasks.symmetry import PpoWithSymmetryCfg
 
 TASK_ID = "Mjlab-Getup-QddBiped"
 
@@ -378,7 +378,12 @@ QddBipedGetupRlCfg = RslRlOnPolicyRunnerCfg(
         lam=0.95,
         desired_kl=0.01,
         max_grad_norm=1.0,
-        symmetry_cfg=dict(QDD_SYMMETRY_CFG),
+        # No mirror loss (getup1-6 had it): it makes the policy left/right
+        # symmetric, pi(mirror s) = mirror pi(s), so from a symmetric lying pose
+        # it can only push both legs alike, and every get-up found starts with
+        # one leg kicking (getup4-6 stood only from states already moving
+        # asymmetrically). AGENTS.md: never for asymmetric tasks.
+        symmetry_cfg=None,
     ),
     wandb_project="mjlab_qdd_biped",
     experiment_name="qdd_biped_getup",

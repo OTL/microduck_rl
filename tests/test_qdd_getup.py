@@ -475,3 +475,12 @@ def test_getup_demo_tracking_scores_the_demo_and_its_mirror(getup_train_env):
     term.index[:] = int(torch.nonzero(term.kind == term.kinds.index("crouch"))[0, 0])
     term.index[0] = -1
     assert torch.all(tr(env, **env.reward_manager.get_term_cfg("demo_tracking").params) == 0)
+
+
+def test_getup_runner_has_no_mirror_loss():
+    """Getting up from a symmetric lying pose starts with one leg: a mirror-
+    symmetric policy cannot do that (getup1-6)."""
+    from mjlab_microduck.tasks.qdd_biped_getup_env_cfg import QddBipedGetupRlCfg
+
+    sc = QddBipedGetupRlCfg.algorithm.symmetry_cfg
+    assert sc is None or not (sc.get("use_mirror_loss") or sc.get("use_data_augmentation"))
