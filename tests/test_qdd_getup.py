@@ -102,8 +102,13 @@ def test_getup_cfg():
     w = {k: v.weight for k, v in cfg.rewards.items()}
     for k in ("getup_progress", "standing", "stand_still", "stand_pose"):
         assert w[k] > 0, k
+    # costs: negative at their final stage (ramped from 0, see PENALTY_RAMP)
+    final = {k: v.weight for k, v in cfg.rewards.items()}
+    for name, c in cfg.curriculum.items():
+        if name.endswith("_weight") and "reward_name" in c.params:
+            final[c.params["reward_name"]] = c.params["weight_stages"][-1]["weight"]
     for k in ("torso_ang_vel", "body_impact", "action_rate_l2", "joint_torques", "knee_limit", "self_collisions"):
-        assert w[k] < 0, k
+        assert final[k] < 0 and w[k] <= 0, k
     first = next(iter(cfg.events))
     assert first == "reset_getup"  # before the DR events, replaces reset_base / reset_robot_joints
     assert "reset_base" not in cfg.events and "push_robot" not in cfg.events
@@ -484,3 +489,16 @@ def test_getup_runner_has_no_mirror_loss():
 
     sc = QddBipedGetupRlCfg.algorithm.symmetry_cfg
     assert sc is None or not (sc.get("use_mirror_loss") or sc.get("use_data_augmentation"))
+
+
+def test_getup_attempt_taxes_start_at_zero(getup_train_env):
+    """While the get-up is being discovered, thrashing must not cost more than
+    following the demo pays (getup1-7)."""
+    from mjlab_microduck.tasks.qdd_biped_getup_env_cfg import RAMPED_PENALTIES
+
+    env = getup_train_env
+    env.common_step_counter = 0
+    env.curriculum_manager.compute(env_ids=torch.arange(env.num_envs))
+    for name in RAMPED_PENALTIES:
+        assert env.reward_manager.get_term_cfg(name).weight == 0.0, name
+    assert env.reward_manager.get_term_cfg("demo_tracking").weight > 0

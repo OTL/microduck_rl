@@ -123,11 +123,23 @@ STAND_POSE_STD = 0.25  # rad, sqrt of the summed squared joint errors
 # getup4/5 stood only from states already moving along the demo. A guide, not
 # the goal: per step at most DEMO_TRACK_WEIGHT (~0.5 x the standing pay),
 # lowered once the get-up exists so the policy can improve on the demo.
-DEMO_TRACK_WEIGHT = 1.5
-DEMO_TRACK_LATE_WEIGHT = 0.5
+# getup6/7 (std 1.0 / 0.5, weight 1.5): the score stayed at the do-nothing
+# level (0.07). With the initial action noise the summed squared joint error is
+# ~5 rad^2, so exp(-5 / 1.0) ~ 0: the current policy scored nothing and had no
+# gradient. Wider kernels, a larger weight (AGENTS.md: pick stds wide enough
+# that the current policy scores visibly).
+DEMO_TRACK_WEIGHT = 3.0
+DEMO_TRACK_LATE_WEIGHT = 1.0
 DEMO_TRACK_LATE_ITER = 1500
-DEMO_TRACK_STD_Q = 1.0  # rad, sqrt of the summed squared joint errors
-DEMO_TRACK_STD_G = 0.5  # torso gravity direction (unit vector) error
+DEMO_TRACK_STD_Q = 2.5  # rad, sqrt of the summed squared joint errors
+DEMO_TRACK_STD_G = 1.0  # torso gravity direction (unit vector) error
+# Attempt taxes off while the get-up is discovered (AGENTS.md). Measured on the
+# lying starts with the initial noise (CPU, getup7 cfg): torso_ang_vel -0.43,
+# knee_limit -0.15, self_collisions -0.07 per episode against +0.03 from
+# tracking: "lie still" won. These weights x the stage factor below.
+PENALTY_RAMP = ((0, 0.0), (600, 0.25), (1000, 1.0))  # (iteration, factor)
+RAMPED_PENALTIES = ("torso_ang_vel", "knee_limit", "self_collisions", "body_impact", "dof_pos_limits", "joint_torques")
+INIT_ACTION_STD = 0.6  # getup1-7: 1.0 (white noise x 0.75 rad thrashes the lying robot)
 
 # Violence / hardware.
 TORSO_ANG_VEL_LIMIT = 7.0  # rad/s, cost above (the found get-up swings the torso at up to 6 rad/s)
@@ -276,6 +288,9 @@ def make_qdd_biped_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     )
 
     # --- Curricula -----------------------------------------------------------------
+    penalty_base = {name: cfg.rewards[name].weight for name in RAMPED_PENALTIES}
+    for name in RAMPED_PENALTIES:  # reward_weight applies a stage only after its step
+        cfg.rewards[name].weight = penalty_base[name] * PENALTY_RAMP[0][1]
     cfg.curriculum = {
         "path_frontier": CurriculumTermCfg(
             func=microduck_mdp.getup_path_frontier,
@@ -298,6 +313,19 @@ def make_qdd_biped_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 ],
             },
         ),
+        **{
+            f"{name}_weight": CurriculumTermCfg(
+                func=microduck_mdp.reward_weight,
+                params={
+                    "reward_name": name,
+                    "weight_stages": [
+                        {"step": it * NUM_STEPS_PER_ENV, "weight": penalty_base[name] * f}
+                        for it, f in PENALTY_RAMP
+                    ],
+                },
+            )
+            for name in RAMPED_PENALTIES
+        },
         # Smoothness only after the get-up exists (AGENTS.md: no attempt-tax
         # while a hard skill is being discovered).
         "action_rate_weight": CurriculumTermCfg(
@@ -362,7 +390,7 @@ QddBipedGetupRlCfg = RslRlOnPolicyRunnerCfg(
         hidden_dims=(512, 256, 128),
         activation="elu",
         obs_normalization=True,
-        distribution_cfg={"class_name": "GaussianDistribution", "init_std": 1.0, "std_type": "scalar"},
+        distribution_cfg={"class_name": "GaussianDistribution", "init_std": INIT_ACTION_STD, "std_type": "scalar"},
     ),
     critic=RslRlModelCfg(hidden_dims=(512, 256, 128), activation="elu", obs_normalization=True),
     algorithm=PpoWithSymmetryCfg(
