@@ -8454,3 +8454,56 @@ def body_impact_cost(env: ManagerBasedRlEnv, sensor_name: str, threshold: float)
     cost = torch.clamp(mag - threshold, min=0.0) / threshold
     env.extras["log"]["Metrics/body_impact_peak_n"] = torch.nan_to_num(mag.amax(dim=1), nan=0.0).mean()
     return torch.nan_to_num(cost.sum(dim=1), nan=0.0)
+
+
+# =============================================================================
+# QDD biped rough terrain: terrain curriculum for a slow robot
+# =============================================================================
+# mjlab's terrain_levels_vel moves a robot up when it ends an episode more than
+# half a patch (2.5 m) from its start, down when it walked less than half of
+# |final command| x episode length. The QDD biped walks at most 0.5 m/s with a
+# command resampled every 3-8 s (turns, sidesteps, backwards, standing), so it
+# rarely ends 2.5 m away even on flat ground: run rough1 ended with the FLAT
+# column at mean level 0.46 and stairs at 0.37 (demoted almost every reset).
+# Here the level follows what the curriculum is meant to measure: did the robot
+# walk the whole episode on that terrain, tracking its command, without falling?
+
+
+def qdd_terrain_levels_survival(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    command_name: str = "twist",
+    max_err_xy: float = 0.2,
+    min_episode_frac: float = 0.95,
+) -> dict[str, torch.Tensor]:
+    """CURRICULUM: per reset env, one row up if it ran (nearly) the whole episode
+    without a failure termination and its mean xy velocity error was below
+    ``max_err_xy`` m/s; one row down if a failure termination (fall, ground
+    contact, ...) ended it. Logs the mean / max level and the mean level per
+    terrain type, like terrain_levels_vel."""
+    terrain = env.scene.terrain
+    assert terrain is not None
+    gen = terrain.cfg.terrain_generator
+    assert gen is not None
+    if len(env_ids) > 0:
+        failed = env.termination_manager.terminated[env_ids]
+        steps = env.episode_length_buf[env_ids].float().clamp(min=1.0)
+        full = steps >= min_episode_frac * env.max_episode_length
+        term = env.command_manager.get_term(command_name)
+        # error_vel_xy accumulates |err| / (max resampling time / step_dt) per step
+        max_cmd_steps = term.cfg.resampling_time_range[1] / env.step_dt
+        err_xy = term.metrics["error_vel_xy"][env_ids] * max_cmd_steps / steps
+        move_up = ~failed & full & (err_xy < max_err_xy)
+        move_down = failed & ~move_up
+        terrain.update_env_origins(env_ids, move_up, move_down)
+
+    levels = terrain.terrain_levels.float()
+    result: dict[str, torch.Tensor] = {"mean": levels.mean(), "max": levels.max()}
+    names = list(gen.sub_terrains.keys())
+    origins = terrain.terrain_origins
+    if origins is not None and origins.shape[1] == len(names):
+        for i, name in enumerate(names):
+            mask = terrain.terrain_types == i
+            if mask.any():
+                result[name] = levels[mask].mean()
+    return result

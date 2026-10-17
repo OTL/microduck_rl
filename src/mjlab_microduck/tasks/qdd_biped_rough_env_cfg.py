@@ -8,9 +8,9 @@ controller/config/robot.toml changes.
 
 What changes against the flat task:
   - terrain: QDD_ROUGH_TERRAINS_CFG (curriculum mode: one column per terrain
-    type, 10 difficulty rows; mjlab terrain_levels_vel moves a robot one row up
-    when it walked more than half a patch, down when it walked less than half
-    of what its command asked for),
+    type, 10 difficulty rows; a robot moves one row up after a whole episode
+    without a fall and with good velocity tracking, one row down after a fall:
+    mdp.qdd_terrain_levels_survival),
   - foot heights in the gait rewards are the clearance above the terrain under
     each foot (foot_height_scan), not world z,
   - the critic also gets a height scan around the torso (privileged, training
@@ -27,10 +27,10 @@ from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs import mdp as envs_mdp
 from mjlab.managers import CurriculumTermCfg, ObservationTermCfg
 from mjlab.sensor import GridPatternCfg, ObjRef, RayCastSensorCfg, RingPatternCfg, TerrainHeightSensorCfg
-from mjlab.tasks.velocity import mdp
 from mjlab.terrains.terrain_generator import TerrainGeneratorCfg
 
 from mjlab_microduck.robot.qdd_biped_constants import TORSO_BODY, get_qdd_biped_spec
+from mjlab_microduck.tasks import mdp as microduck_mdp
 from mjlab_microduck.tasks.qdd_biped_velocity_env_cfg import make_qdd_biped_velocity_env_cfg
 
 # Terrain. The robot: 0.26 m legs, 5 cm swing apex (3.5 cm minimum clearance),
@@ -109,6 +109,11 @@ CRITIC_SCAN_RESOLUTION = 0.1
 SOLE_SCAN_LIFT = 0.05  # m
 SOLE_SCAN_SITES = ("l_sole_scan_site", "r_sole_scan_site")
 
+# Terrain curriculum (mdp.qdd_terrain_levels_survival): one row up after a whole
+# episode without a fall and with a mean xy velocity error below this; one row
+# down after a fall. (mjlab's distance rule demoted even the flat column: rough1.)
+TERRAIN_UP_MAX_ERR_XY = 0.2  # m/s
+
 # Play (export / video): terrain levels for the fixed command schedule.
 PLAY_TERRAIN_ROWS = 4
 
@@ -177,8 +182,8 @@ def make_qdd_biped_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # --- Curriculum: terrain levels ----------------------------------------------------
     if not play:
         cfg.curriculum["terrain_levels"] = CurriculumTermCfg(
-            func=mdp.terrain_levels_vel,
-            params={"command_name": "twist"},
+            func=microduck_mdp.qdd_terrain_levels_survival,
+            params={"command_name": "twist", "max_err_xy": TERRAIN_UP_MAX_ERR_XY},
         )
 
     return cfg

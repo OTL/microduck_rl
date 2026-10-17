@@ -232,3 +232,29 @@ def test_rough_env_steps():
         assert h.shape == (12, 2) and torch.all(h.abs() < 0.03)  # standing: soles on the ground
     finally:
         env.close()
+
+
+def test_rough_terrain_levels_follow_survival():
+    """Up after a whole tracked episode, down after a fall, unchanged otherwise."""
+    from mjlab.envs import ManagerBasedRlEnv
+
+    cfg = make_qdd_biped_rough_env_cfg()
+    cfg.scene.num_envs = 6
+    env = ManagerBasedRlEnv(cfg=cfg, device="cpu")
+    try:
+        env.reset()
+        terrain = env.scene.terrain
+        term = env.command_manager.get_term("twist")
+        ids = torch.arange(6)
+        terrain.terrain_levels[:] = 3
+        env.episode_length_buf[:] = env.max_episode_length
+        term.metrics["error_vel_xy"][:] = 0.0
+        term.metrics["error_vel_xy"][2] = 10.0  # tracked badly
+        env.termination_manager._terminated_buf[:] = False
+        env.termination_manager._terminated_buf[1] = True  # fell
+        env.episode_length_buf[3] = 10  # short episode, no fall (cannot happen, but: no move)
+        out = microduck_mdp.qdd_terrain_levels_survival(env, ids)
+        assert terrain.terrain_levels.tolist() == [4, 2, 3, 3, 4, 4]
+        assert "stairs" in out and "flat" in out
+    finally:
+        env.close()
