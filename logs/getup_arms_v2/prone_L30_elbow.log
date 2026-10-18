@@ -1,0 +1,133 @@
+[mdp] Patches 1-2 active: NaN-safe reward/advantage
+[mdp] Patch 4 active: ONNX export filters passive_* joints
+[mdp] Patch 5 active: MICRODUCK_WARM_START=1 restarts curricula after checkpoint load
+[WARN] Failed to load task package mjlab_microduck: cannot import name 'FOOT_GEOMS' from partially initialized module 'mjlab_microduck.robot.qdd_biped_constants' (most likely due to a circular import) (/duck/src/mjlab_microduck/robot/qdd_biped_constants.py)
+Warp 1.12.0 initialized:
+   CUDA Toolkit 12.9, Driver 12.8
+   Devices:
+     "cpu"      : "CPU"
+     "cuda:0"   : "NVIDIA GeForce RTX 4090" (24 GiB, sm_89, mempool enabled)
+   Kernel cache:
+     /root/.cache/warp/1.12.0
+Warp DeprecationWarning: The symbol `warp.context.runtime` will soon be removed from the public API. It can still be accessed from `warp._src.context.runtime` but might be changed or removed without notice.
+0 best -1.382 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.5s
+1 best -1.350 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.0s
+2 best -1.247 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 6.9s
+3 best -1.323 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.1s
+4 best -1.179 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.0s
+5 best -1.274 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 6.8s
+6 best -1.287 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.3s
+7 best -1.019 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.2s
+8 best -0.932 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.0s
+9 best -1.125 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.4s
+10 best -1.121 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.4s
+11 best -0.908 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.0s
+12 best -0.880 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.3s
+13 best -0.838 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.6s
+14 best -0.788 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.3s
+15 best -0.764 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 6.8s
+16 best -0.651 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.2s
+17 best -0.627 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 6.8s
+18 best -0.633 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.0s
+19 best -0.611 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.4s
+20 best -0.573 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 6.7s
+21 best -0.566 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 6.8s
+22 best -0.568 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 6.9s
+23 best -0.564 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.0s
+24 best -0.542 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 6.7s
+25 best -0.513 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.0s
+26 best -0.436 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.0s
+27 best -0.446 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 6.7s
+28 best -0.478 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 6.7s
+29 best -0.237 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.1s
+30 best -0.121 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.0s
+31 best 0.073 ok(best) 0.12 ok(elite) 0.00 mu-ok 0.00 7.1s
+32 best -0.048 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.1s
+33 best -0.049 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.6s
+34 best -0.041 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.2s
+35 best -0.097 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.4s
+36 best -0.035 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.6s
+37 best -0.005 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.1s
+38 best -0.019 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.4s
+39 best -0.038 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.5s
+40 best -0.007 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.1s
+41 best -0.004 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.2s
+42 best 0.357 ok(best) 0.12 ok(elite) 0.00 mu-ok 0.00 7.2s
+43 best -0.004 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.1s
+44 best -0.001 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.0s
+45 best -0.001 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 6.9s
+46 best -0.001 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.2s
+47 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.3s
+48 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.3s
+49 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.1s
+50 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.3s
+51 best -0.031 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.5s
+52 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.2s
+53 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.0s
+54 best -0.036 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.6s
+55 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.1s
+56 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.0s
+57 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.2s
+58 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.1s
+59 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.5s
+60 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.4s
+61 best -0.036 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.8s
+62 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.3s
+63 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.5s
+64 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.2s
+65 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.4s
+66 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.3s
+67 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.5s
+68 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.6s
+69 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.4s
+70 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.4s
+71 best -0.001 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.9s
+72 best -0.008 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 8.0s
+73 best -0.001 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 8.0s
+74 best -0.001 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 8.0s
+75 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.4s
+76 best -0.004 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.9s
+77 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.3s
+78 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.4s
+79 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.4s
+80 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.3s
+81 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.5s
+82 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.5s
+83 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.4s
+84 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.6s
+85 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.6s
+86 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.4s
+87 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.6s
+88 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.9s
+89 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.6s
+90 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.6s
+91 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.5s
+92 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.7s
+93 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 8.1s
+94 best -0.001 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 8.1s
+95 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.5s
+96 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.5s
+97 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.6s
+98 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 8.2s
+99 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.5s
+100 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 8.1s
+101 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.6s
+102 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.6s
+103 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 8.1s
+104 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.7s
+105 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.9s
+106 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.5s
+107 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.8s
+108 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.7s
+109 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.7s
+110 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.7s
+111 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.9s
+112 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.8s
+113 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.9s
+114 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.8s
+115 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 8.5s
+116 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 8.0s
+117 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 8.0s
+118 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 8.4s
+119 best -0.000 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 7.9s
+done logs/getup_arms_v2/prone_L30_elbow.npz

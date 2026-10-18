@@ -1,0 +1,140 @@
+[mdp] Patches 1-2 active: NaN-safe reward/advantage
+[mdp] Patch 4 active: ONNX export filters passive_* joints
+[mdp] Patch 5 active: MICRODUCK_WARM_START=1 restarts curricula after checkpoint load
+[WARN] Failed to load task package mjlab_microduck: cannot import name 'FOOT_GEOMS' from partially initialized module 'mjlab_microduck.robot.qdd_biped_constants' (most likely due to a circular import) (/duck/src/mjlab_microduck/robot/qdd_biped_constants.py)
+Warp 1.12.0 initialized:
+   CUDA Toolkit 12.9, Driver 12.8
+   Devices:
+     "cpu"      : "CPU"
+     "cuda:0"   : "NVIDIA GeForce RTX 4090" (24 GiB, sm_89, mempool enabled)
+   Kernel cache:
+     /root/.cache/warp/1.12.0
+Warp DeprecationWarning: The symbol `warp.context.runtime` will soon be removed from the public API. It can still be accessed from `warp._src.context.runtime` but might be changed or removed without notice.
+0 best -1.408 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 6.4s
+1 best -1.339 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 6.0s
+2 best -1.313 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 6.5s
+3 best -1.360 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 6.5s
+4 best -1.295 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 6.1s
+5 best -1.299 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 6.0s
+6 best -1.304 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 6.3s
+Warning: EPA horizon = 24 isn't large enough.
+7 best -1.296 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 6.2s
+8 best -1.293 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 6.1s
+9 best -1.274 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 6.3s
+10 best -1.293 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 6.8s
+11 best -1.294 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 6.3s
+12 best -1.293 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 6.2s
+13 best -1.288 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 6.1s
+14 best -1.278 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 6.1s
+15 best -1.288 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 5.9s
+16 best -1.290 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 6.4s
+17 best -1.286 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 5.9s
+18 best -1.290 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 6.1s
+19 best -1.285 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 6.1s
+20 best -1.282 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 5.9s
+21 best -1.233 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 5.7s
+22 best -1.285 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 6.1s
+23 best -1.177 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 5.9s
+24 best -1.264 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 5.6s
+25 best -1.260 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 6.2s
+26 best -1.248 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 5.9s
+Warning: EPA horizon = 24 isn't large enough.
+27 best -1.254 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 5.3s
+28 best -1.230 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 5.3s
+29 best -1.175 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 5.2s
+30 best -0.992 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 5.4s
+31 best -0.801 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 5.1s
+32 best -0.336 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 5.0s
+33 best -0.585 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 5.6s
+34 best -0.475 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 5.1s
+35 best -0.478 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 5.0s
+36 best -0.369 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 5.5s
+37 best -0.303 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 5.5s
+38 best -0.163 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 6.4s
+39 best -0.243 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 5.5s
+40 best -0.307 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 5.3s
+41 best -0.267 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 5.3s
+42 best -0.264 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 5.2s
+43 best -0.171 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 5.7s
+44 best -0.172 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 5.2s
+45 best -0.059 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 5.2s
+46 best 0.934 ok(best) 0.25 ok(elite) 0.01 mu-ok 0.00 5.5s
+47 best -0.009 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 5.5s
+48 best 0.300 ok(best) 0.12 ok(elite) 0.00 mu-ok 0.00 5.4s
+49 best 0.383 ok(best) 0.12 ok(elite) 0.00 mu-ok 0.00 5.1s
+50 best 0.141 ok(best) 0.12 ok(elite) 0.00 mu-ok 0.00 5.2s
+51 best 0.331 ok(best) 0.12 ok(elite) 0.00 mu-ok 0.00 5.0s
+Warning: EPA horizon = 24 isn't large enough.
+52 best -0.005 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 5.4s
+53 best 0.522 ok(best) 0.12 ok(elite) 0.00 mu-ok 0.00 5.1s
+54 best -0.001 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 5.0s
+55 best -0.003 ok(best) 0.12 ok(elite) 0.00 mu-ok 0.00 5.3s
+56 best -0.001 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 5.1s
+57 best -0.001 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 5.2s
+58 best -0.001 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 5.1s
+59 best -0.005 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 5.3s
+60 best 0.250 ok(best) 0.12 ok(elite) 0.01 mu-ok 0.00 5.2s
+61 best 0.194 ok(best) 0.12 ok(elite) 0.01 mu-ok 0.00 5.2s
+Warning: EPA horizon = 24 isn't large enough.
+62 best 0.252 ok(best) 0.12 ok(elite) 0.00 mu-ok 0.00 5.6s
+63 best -0.001 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 5.6s
+64 best 0.634 ok(best) 0.12 ok(elite) 0.01 mu-ok 0.00 5.4s
+65 best 0.661 ok(best) 0.12 ok(elite) 0.01 mu-ok 0.00 5.5s
+66 best 0.413 ok(best) 0.12 ok(elite) 0.00 mu-ok 0.00 5.4s
+67 best 0.577 ok(best) 0.12 ok(elite) 0.02 mu-ok 0.00 5.3s
+68 best 0.044 ok(best) 0.12 ok(elite) 0.00 mu-ok 0.00 5.3s
+69 best 0.642 ok(best) 0.12 ok(elite) 0.00 mu-ok 0.00 5.5s
+Warning: EPA horizon = 24 isn't large enough.
+Warning: EPA horizon = 24 isn't large enough.
+70 best 0.276 ok(best) 0.12 ok(elite) 0.00 mu-ok 0.00 5.4s
+71 best 0.590 ok(best) 0.25 ok(elite) 0.01 mu-ok 0.00 5.5s
+72 best 1.447 ok(best) 0.25 ok(elite) 0.02 mu-ok 0.00 5.4s
+73 best 0.693 ok(best) 0.12 ok(elite) 0.01 mu-ok 0.00 5.4s
+74 best 1.205 ok(best) 0.25 ok(elite) 0.02 mu-ok 0.00 5.6s
+75 best 0.635 ok(best) 0.12 ok(elite) 0.00 mu-ok 0.00 5.4s
+76 best -0.001 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 5.5s
+77 best 2.691 ok(best) 0.50 ok(elite) 0.03 mu-ok 0.00 5.7s
+78 best 0.463 ok(best) 0.12 ok(elite) 0.01 mu-ok 0.00 5.5s
+79 best 0.667 ok(best) 0.12 ok(elite) 0.02 mu-ok 0.00 5.5s
+80 best 0.517 ok(best) 0.12 ok(elite) 0.02 mu-ok 0.00 5.5s
+81 best 0.709 ok(best) 0.12 ok(elite) 0.02 mu-ok 0.00 5.5s
+Warning: EPA horizon = 24 isn't large enough.
+82 best 0.473 ok(best) 0.12 ok(elite) 0.00 mu-ok 0.00 5.5s
+83 best 0.582 ok(best) 0.12 ok(elite) 0.01 mu-ok 0.00 5.5s
+84 best 0.634 ok(best) 0.12 ok(elite) 0.00 mu-ok 0.00 5.6s
+85 best 0.937 ok(best) 0.25 ok(elite) 0.02 mu-ok 0.00 5.5s
+86 best 0.721 ok(best) 0.12 ok(elite) 0.01 mu-ok 0.00 5.6s
+87 best 1.074 ok(best) 0.25 ok(elite) 0.02 mu-ok 0.00 5.8s
+88 best 1.196 ok(best) 0.25 ok(elite) 0.03 mu-ok 0.00 5.5s
+89 best 1.720 ok(best) 0.38 ok(elite) 0.02 mu-ok 0.00 6.0s
+90 best 1.270 ok(best) 0.25 ok(elite) 0.02 mu-ok 0.00 5.7s
+91 best 0.610 ok(best) 0.12 ok(elite) 0.02 mu-ok 0.00 5.7s
+92 best 1.281 ok(best) 0.25 ok(elite) 0.03 mu-ok 0.00 5.8s
+93 best 1.305 ok(best) 0.25 ok(elite) 0.02 mu-ok 0.00 5.8s
+94 best 2.041 ok(best) 0.38 ok(elite) 0.02 mu-ok 0.00 5.8s
+95 best 1.392 ok(best) 0.25 ok(elite) 0.04 mu-ok 0.00 5.5s
+96 best 2.341 ok(best) 0.50 ok(elite) 0.04 mu-ok 0.12 5.5s
+97 best 2.191 ok(best) 0.38 ok(elite) 0.04 mu-ok 0.00 5.6s
+98 best 0.818 ok(best) 0.25 ok(elite) 0.04 mu-ok 0.00 5.6s
+99 best 1.885 ok(best) 0.38 ok(elite) 0.04 mu-ok 0.00 5.5s
+100 best 1.154 ok(best) 0.25 ok(elite) 0.03 mu-ok 0.00 5.6s
+101 best 0.701 ok(best) 0.12 ok(elite) 0.04 mu-ok 0.00 5.5s
+102 best 0.762 ok(best) 0.25 ok(elite) 0.03 mu-ok 0.00 5.7s
+103 best 1.136 ok(best) 0.25 ok(elite) 0.02 mu-ok 0.00 5.8s
+104 best 0.670 ok(best) 0.12 ok(elite) 0.03 mu-ok 0.00 5.4s
+105 best 0.962 ok(best) 0.25 ok(elite) 0.03 mu-ok 0.00 5.8s
+106 best 0.568 ok(best) 0.12 ok(elite) 0.01 mu-ok 0.00 5.6s
+107 best -0.001 ok(best) 0.00 ok(elite) 0.00 mu-ok 0.00 5.6s
+108 best 1.329 ok(best) 0.25 ok(elite) 0.04 mu-ok 0.00 5.6s
+109 best 0.554 ok(best) 0.12 ok(elite) 0.01 mu-ok 0.00 5.5s
+110 best 1.291 ok(best) 0.25 ok(elite) 0.04 mu-ok 0.00 5.8s
+111 best 0.491 ok(best) 0.12 ok(elite) 0.01 mu-ok 0.00 5.6s
+112 best 0.647 ok(best) 0.12 ok(elite) 0.02 mu-ok 0.00 6.0s
+113 best 1.211 ok(best) 0.25 ok(elite) 0.02 mu-ok 0.00 5.5s
+114 best 3.409 ok(best) 0.62 ok(elite) 0.05 mu-ok 0.00 5.8s
+115 best 1.427 ok(best) 0.25 ok(elite) 0.05 mu-ok 0.00 5.5s
+116 best 2.027 ok(best) 0.38 ok(elite) 0.10 mu-ok 0.00 5.6s
+117 best 2.691 ok(best) 0.62 ok(elite) 0.11 mu-ok 0.12 5.7s
+118 best 2.720 ok(best) 0.50 ok(elite) 0.18 mu-ok 0.38 5.5s
+119 best 2.296 ok(best) 0.50 ok(elite) 0.22 mu-ok 0.25 5.6s
+done logs/getup_arms_v2/supine_L20_elbow.npz
