@@ -4,7 +4,7 @@
 #   uv run python scripts/qdd_getup_search/arms_replay.py logs/getup_arms/<run>.npz --gif <run>.gif
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-OUT=logs/getup_arms; mkdir -p "$OUT"
+OUT=${OUT:-logs/getup_arms}; mkdir -p "$OUT"
 ITERS=${ITERS:-120}
 for face in prone supine; do
   for len in 0.20 0.30; do
