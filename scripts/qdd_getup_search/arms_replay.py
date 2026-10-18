@@ -31,6 +31,7 @@ def rollout(m, S, x, q0_state, rec=False, speed_limit=True):
     frames = []
     vmax = np.array(G.vmax_list(a.elbow))
     peak = np.zeros_like(vmax)
+    spin = 0.0
     for p, q, du in segs + [(allk[-1], allk[-1], a.hold)]:
         n = round(du / G.DT)
         for i in range(n):
@@ -43,11 +44,12 @@ def rollout(m, S, x, q0_state, rec=False, speed_limit=True):
             d.qfrc_applied[6:] = np.clip(tau, lo, hi)
             mujoco.mj_step(m, d)
             peak = np.maximum(peak, np.abs(d.qvel[6:]) / vmax)
+            spin = max(spin, float(np.linalg.norm(d.qvel[3:6])))
             if rec and i % 10 == 0:
                 frames.append(d.qpos.copy())
     up, z = d.xmat[1][8], d.qpos[2]
     ok = up > 0.9 and abs(z - G.rc.STAND_BASE_Z) < 0.03
-    return ok, (frames if rec else peak)
+    return ok, (frames if rec else np.r_[peak, spin])
 
 
 def main():
@@ -83,7 +85,13 @@ def main():
     res = [rollout(S.m, S, x, s, speed_limit=sl) for s in st]
     oks = [o for o, _ in res]
     peak = np.max([p for _, p in res], 0)
-    print("peak |qd| / no-load speed per joint:", np.round(peak, 2))
+    print(
+        "peak |qd| / no-load speed per joint:",
+        np.round(peak[:-1], 2),
+        "torso spin max",
+        round(peak[-1], 1),
+        "rad/s",
+    )
     print(
         f"{r.which}: stood {sum(oks)} / {len(oks)} ({a.face}, arm {a.arm_len} m, elbow {a.elbow})"
     )

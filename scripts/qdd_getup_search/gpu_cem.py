@@ -257,7 +257,9 @@ class Search:
             )
         )
         q[..., [3, 8]] = torch.minimum(q[..., [3, 8]], kmax)
-        durs = torch.clamp(X[:, NK * k : NK * k + NK], 0.05, 1.5)
+        durs = torch.clamp(
+            X[:, NK * k : NK * k + NK], getattr(self.a, "min_dur", 0.05), 1.5
+        )
         return q, durs
 
     @torch.no_grad()
@@ -303,6 +305,7 @@ class Search:
         T = prep + durs.sum(1).max().item() + a.hold
         n = int(T / DT)
         prog = torch.zeros(W, device=self.dev)
+        spin = torch.zeros(W, device=self.dev)  # peak torso angular speed
         rows = []
         ar = torch.arange(W, device=self.dev)
         zero = torch.zeros(W, 1, device=self.dev)
@@ -330,6 +333,7 @@ class Search:
             self.sim.step()
             if i % 10 == 0:
                 up = d.xmat[:, 1, 2, 2]
+                spin = torch.maximum(spin, d.qvel[:, 3:6].norm(dim=1))
                 prog = torch.maximum(
                     prog, up * torch.clamp(d.qpos[:, 2] / rc.STAND_BASE_Z, max=1.0)
                 )
@@ -345,6 +349,7 @@ class Search:
             - torch.clamp((z - rc.STAND_BASE_Z).abs() / 0.05, max=3)
             - 0.5 * d.qvel[:, :6].norm(dim=1).clamp(max=6)
             + 2 * prog
+            - a.spin_w * torch.clamp(spin - a.spin_free, min=0)
             + 2 * ok.float()
         )
         s = torch.where(bad, torch.full_like(s, -10.0), s)
@@ -401,6 +406,12 @@ def main():
     ap.add_argument("--prep", type=float, default=1.0)
     ap.add_argument("--hold", type=float, default=1.5)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument(
+        "--spin-free", type=float, default=6.0, help="torso rad/s that costs nothing"
+    )
+    ap.add_argument(
+        "--spin-w", type=float, default=0.3, help="score per rad/s above --spin-free"
+    )
     ap.add_argument(
         "--no-speed-limit",
         dest="speed_limit",
