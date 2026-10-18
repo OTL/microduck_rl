@@ -198,7 +198,7 @@ python3 bench_duck.py --task Mjlab-Velocity-Flat-QddBiped --envs 64 --iters 5
 
 ## 腕つき（2026-10-18）
 
-腕で両足をそろえて起き上がれるように、肩と肘の 2 軸の腕（肩の軸から手先まで 25 cm＝上腕 10＋前腕 15、手先に TPU のパッド、モータは両方 GIM3510-8、腕 1 本 0.74 kg、全体 6.61 → 8.10 kg。10/18 OTLさん承認の CAD 第 2 版の値）を付けたモデルと課題。長さ 20 cm までは探索（`scripts/qdd_getup_search/`）で決め、25 cm は CAD で決めた。手本（getup_demo_traj_arms.npz）は 20 cm の探索の動きのまま（25 cm では開ループで立たない。学習の手がかりとして使い、path の状態は床にめり込まないよう持ち上げる）。ロボットのリポジトリの `robot/model.py` にはまだ入っていない（`robot/qdd_biped_constants.py` の `add_arms`）。
+腕で両足をそろえて起き上がれるように、肩と肘の 2 軸の腕（肩の軸から手先まで 25 cm＝上腕 10＋前腕 15、手先に TPU のパッド、モータは両方 GIM3510-8、腕 1 本 0.74 kg、全体 6.61 → 8.10 kg。10/18 OTLさん承認の CAD 第 2 版の値）を付けたモデルと課題。長さ 20 cm までは探索（`scripts/qdd_getup_search/`）で決め、25 cm は CAD で決めた。手本（getup_demo_traj_arms.npz）は、10/18 夜に 25 cm の腕（`gpu_cem.py --cad`、肘は前曲げ）で探し直した仰向けの起き上がり（20 cm の候補 B から --asym --sd0 0.04 で詰め直し、速さの制限ありの再生で 32 回中 27 回立つ。結果 /mnt/project-files/robo/getup/arms/arms25_supine_cad_from20_sd004.npz、動画 arms25_supine.gif）。肩を後ろに 2 rad まで回して手を床につき、肘はほとんど使わない。--cad の対称探索は仰向け・うつ伏せとも立てなかった。ロボットのリポジトリの `robot/model.py` にはまだ入っていない（`robot/qdd_biped_constants.py` の `add_arms`）。
 
 | 課題 | 腕 | 観測 / 行動 |
 |---|---|---|
