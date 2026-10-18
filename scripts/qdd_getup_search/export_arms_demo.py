@@ -6,7 +6,7 @@ every 20 ms in the format of getup_demo_traj.npz, plus joint_names (legs + arms)
 demo = 1 (supine; the arms demo has no prone get-up, demo 0).
 
   uv run python scripts/qdd_getup_search/export_arms_demo.py \
-      logs/getup_arms_v3/supine_asym_from_v2_small.npz \
+      logs/getup_arms_v5b/supine_cad_from20_sd010.npz \
       --out src/mjlab_microduck/robot/qdd_biped/getup_demo_traj_arms.npz
 """
 
@@ -53,7 +53,7 @@ def record(S, x, q_start):
                 Q.append(d.qpos.copy())
                 V.append(d.qvel.copy())
     ok = d.xmat[1][8] > 0.9 and abs(d.qpos[2] - rc.STAND_BASE_Z) < 0.03
-    return ok, np.array(Q), np.array(V)
+    return ok, np.array(Q), np.array(V), allk, np.asarray(durs, np.float64)
 
 
 def main():
@@ -74,7 +74,7 @@ def main():
     st = G.fall_starts(a.face, r.starts, 1234)
     st = np.c_[st, np.zeros((len(st), na))]
     for k, s in enumerate(st):
-        ok, Q, V = record(S, f[r.which], s)
+        ok, Q, V, allk, durs = record(S, f[r.which], s)
         if ok:
             break
     else:
@@ -92,6 +92,12 @@ def main():
         demo=np.ones(len(Q), np.int8),
         names=np.array(["", f"arms_supine:{r.result.name}"]),
         joint_names=np.array(jn),
+        # the open-loop joint targets (Mjlab-Getup-Supine-QddBipedArms plays them as the
+        # feed-forward of a residual policy): from the start pose to ref_keys[0] in
+        # ref_prep_s, then linearly key to key in ref_durs_s, then ref_keys[-1] (standing)
+        ref_keys=allk.astype(np.float32),
+        ref_durs_s=durs.astype(np.float32),
+        ref_prep_s=np.float32(a.prep),
     )
     print(f"start {k}: {len(Q)} frames ({len(Q) * FRAME_DT:.1f} s) -> {r.out}")
 

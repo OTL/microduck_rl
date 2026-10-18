@@ -67,7 +67,10 @@ def rollout(m, S, x, q0_state, rec=False, speed_limit=True):
             if rec and i % 10 == 0:
                 frames.append(d.qpos.copy())
     up, z = d.xmat[1][8], d.qpos[2]
-    ok = up > 0.9 and abs(z - G.rc.STAND_BASE_Z) < 0.03
+    if getattr(a, "goal", "stand") == "supine":  # rolled onto the back, at rest
+        ok = d.xmat[1][6] > 0.8 and np.linalg.norm(d.qvel[:6]) < 0.3
+    else:
+        ok = up > 0.9 and abs(z - G.rc.STAND_BASE_Z) < 0.03
     return ok, (frames if rec else np.r_[peak, spin])
 
 

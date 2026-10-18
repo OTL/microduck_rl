@@ -8292,9 +8292,11 @@ class reset_from_getup_states:
         band = elig & (self.level > f - self.band[k])
         return elig, band
 
-    def _sample(self, num: int, kind_probs, device) -> torch.Tensor:
-        if kind_probs is None:
+    def _sample(self, num: int, kind_probs, device, supine_only: bool = False) -> torch.Tensor:
+        if kind_probs is None and not supine_only:
             return torch.randint(0, self.n, (num,), device=device)
+        if kind_probs is None:
+            kind_probs = {k: 1.0 / len(self.kinds) for k in self.kinds}
         w = torch.zeros(self.n, device=device)
         for k, p in kind_probs.items():
             if k not in self.kinds:
@@ -8307,7 +8309,13 @@ class reset_from_getup_states:
                     wp = 0.5 * wp + 0.5 * band.float() / band.sum()
                 w += float(p) * wp
             elif sel.any():
+                if supine_only:
+                    sel = sel & ~(self.prone & ~self.is_path)
+                    if not sel.any():
+                        continue
                 w[sel] = float(p) / sel.sum()
+        if supine_only:  # lying on the front: not this task's (path states may lean forward)
+            w = torch.where(self.prone & ~self.is_path, 0.0, w)
         return torch.multinomial(w, num, replacement=True)
 
     def __call__(
@@ -8322,6 +8330,7 @@ class reset_from_getup_states:
         frontiers: dict | None = None,  # read once at init (then moved by getup_path_frontier)
         path_frontier_s: float | None = None,  # round-4 form of frontiers={"path": ...}
         path_band_s: float = 0.5,
+        supine_only: bool = False,  # no lying-on-the-front starts (the supine get-up task)
         asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
     ) -> None:
         if env_ids is None:
@@ -8336,7 +8345,7 @@ class reset_from_getup_states:
             idx = env_ids % self.n
             standing = torch.zeros(num, dtype=torch.bool, device=dev)
         else:
-            idx = self._sample(num, kind_probs, dev)
+            idx = self._sample(num, kind_probs, dev, supine_only)
             standing = torch.rand(num, device=dev) < standing_prob
         self.index[env_ids] = torch.where(standing, -1, idx)
         in_band = torch.full((num,), -1, dtype=torch.long, device=dev)
@@ -9670,3 +9679,105 @@ def qdd_arm_swing_tracking(
     q = asset.data.joint_pos[:, cache[id(asset)]]
     tgt = qdd_arm_swing_target(env, shoulder0, elbow0, amp_max, v_full, elbow_amp, command_name, gait_name)
     return torch.exp(-torch.mean(torch.square(q - tgt), dim=1) / std**2)
+
+
+# =============================================================================
+# Get-up as a residual on the found open-loop motion (Mjlab-Getup-Supine-QddBipedArms,
+# OTL 2026-10-19: keep training the supine get-up; prone rolls over to supine first).
+# arms4/5_getup learned the get-up from scratch with the demo as a reward only and
+# never stood from a real fall, while the found joint-target sequence alone stands
+# from 29/32 supine falls (scripts/qdd_getup_search, speed limits on). Here the
+# policy only corrects that sequence.
+# =============================================================================
+
+
+class GetupReferenceJointPositionAction(_JointAction):
+    """Joint position target = the found get-up's open-loop target at the episode's
+    clock + scale x action (residual). The reference (demo npz ref_keys / ref_durs_s /
+    ref_prep_s, scripts/qdd_getup_search/export_arms_demo.py): from the pose the episode
+    starts in, ramp to ref_keys[0] in ref_prep_s, then key to key, then hold
+    ref_keys[-1] (standing). Clock at reset (reset_from_getup_states' index):
+    path states start at their demo frame (and ramp from the demo's own first
+    pose), standing starts after the end, every other start at 0."""
+
+    cfg: "GetupReferenceJointPositionActionCfg"
+
+    def __init__(self, cfg: "GetupReferenceJointPositionActionCfg", env: ManagerBasedRlEnv):
+        super().__init__(cfg=cfg, env=env)
+        dd = np.load(cfg.demo_path)
+        names = [str(n) for n in dd["joint_names"]]
+        order = [names.index(n) for n in self._target_names]
+        dev = self.device
+        f = lambda a: torch.tensor(np.asarray(a, dtype=np.float32), device=dev)  # noqa: E731
+        self.keys = f(dd["ref_keys"][:, order])  # [K, J]
+        durs = np.asarray(dd["ref_durs_s"], dtype=np.float64)
+        self.prep = float(dd["ref_prep_s"])
+        self.t_keys = f(self.prep + np.r_[0.0, np.cumsum(durs)])  # time of each key
+        self.durs = f(np.maximum(durs, 1e-6))
+        self.t_end = float(self.t_keys[-1])
+        self.frame_dt = 0.02  # demo npz rows (export_arms_demo.FRAME_DT)
+        self.demo_q0 = f(dd["qpos"][0, 7:][order])
+        self._env_ref = env
+        self._pdt = env.physics_dt
+        self.t = torch.zeros(self.num_envs, device=dev)  # seconds on the reference
+        self.q_start = self._entity.data.default_joint_pos[:, self._target_ids].clone()
+        self.residual_gain = float(cfg.residual_gain)
+        self.zero_residual = bool(cfg.zero_residual)
+
+    def reference(self, t: torch.Tensor, q_start: torch.Tensor) -> torch.Tensor:
+        """[B, J] open-loop target at time t [B] for envs starting at q_start [B, J]."""
+        a = torch.clamp(t / self.prep, 0.0, 1.0).unsqueeze(1)
+        prep = q_start + a * (self.keys[0] - q_start)
+        j = torch.clamp(torch.searchsorted(self.t_keys, t.contiguous(), right=True) - 1, 0, len(self.durs) - 1)
+        b = torch.clamp((t - self.t_keys[j]) / self.durs[j], 0.0, 1.0).unsqueeze(1)
+        seg = self.keys[j] + b * (self.keys[j + 1] - self.keys[j])
+        out = torch.where((t < self.prep).unsqueeze(1), prep, seg)
+        return torch.where((t >= self.t_end).unsqueeze(1), self.keys[-1].expand_as(out), out)
+
+    def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
+        super().reset(env_ids)
+        if env_ids is None or isinstance(env_ids, slice):
+            env_ids = torch.arange(self.num_envs, device=self.device)
+        term = self._env_ref.event_manager.get_term_cfg(self.cfg.event_name).func
+        assert isinstance(term, reset_from_getup_states)
+        idx = term.index[env_ids]
+        standing = idx < 0
+        i = idx.clamp(min=0)
+        path = term.is_path[i] & ~standing
+        t0 = torch.where(path, term.demo_frame[i].clamp(min=0).float() * self.frame_dt, 0.0)
+        self.t[env_ids] = torch.where(standing, self.t_end, t0)
+        q = self._entity.data.joint_pos[env_ids][:, self._target_ids]
+        self.q_start[env_ids] = torch.where(path.unsqueeze(1), self.demo_q0.expand_as(q), q)
+
+    def process_actions(self, actions: torch.Tensor):
+        self._raw_actions[:] = actions
+
+    def apply_actions(self) -> None:
+        ref = self.reference(self.t, self.q_start)
+        a = torch.zeros_like(self._raw_actions) if self.zero_residual else self._raw_actions
+        target = ref + a * (self._scale * self.residual_gain)
+        self._processed_actions = target
+        encoder_bias = self._entity.data.encoder_bias[:, self._target_ids]
+        self._entity.set_joint_position_target(target - encoder_bias, joint_ids=self._target_ids)
+        self.t += self._pdt
+
+
+@_dataclass(kw_only=True)
+class GetupReferenceJointPositionActionCfg(_JointPositionActionCfgBase):
+    demo_path: str = ""
+    event_name: str = "reset_getup"
+    residual_gain: float = 1.0
+    zero_residual: bool = False  # play the found motion alone (validation)
+
+    def build(self, env: ManagerBasedRlEnv) -> GetupReferenceJointPositionAction:
+        return GetupReferenceJointPositionAction(self, env)
+
+
+def getup_ref_phase(env: ManagerBasedRlEnv, action_name: str = "joint_pos") -> torch.Tensor:
+    """OBS [B, 2]: where the get-up reference is, s = clock / its length (0..1, 1 after
+    the end = standing): [sin(pi s), cos(pi s)]. The robot's controller runs the same
+    clock (it plays the reference)."""
+    term = env.action_manager.get_term(action_name)
+    assert isinstance(term, GetupReferenceJointPositionAction)
+    s = torch.clamp(term.t / term.t_end, 0.0, 1.0)
+    return torch.stack([torch.sin(math.pi * s), torch.cos(math.pi * s)], dim=1)

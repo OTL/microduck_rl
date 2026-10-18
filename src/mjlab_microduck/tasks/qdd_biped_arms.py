@@ -29,6 +29,7 @@ demo with arms: the prone get-up is left to the policy.
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 import re
 from dataclasses import replace
 from functools import partial
@@ -278,6 +279,57 @@ def make_qdd_biped_getup_arms_env_cfg(play: bool = False) -> ManagerBasedRlEnvCf
 
 
 # =============================================================================
+# Supine get-up as a residual on the found motion (OTL 2026-10-19: "keep training
+# from supine; from prone, roll over to supine first"). arms4/5_getup (the demo as a
+# reward only) never stood from a real fall; the found joint-target sequence alone
+# (getup_demo_traj_arms.npz ref_*, scripts/qdd_getup_search/export_arms_demo.py) stands
+# from 29/32 supine falls in the search model. Here it is the feed-forward and the
+# policy adds a residual (mdp.GetupReferenceJointPositionAction), observing the
+# reference clock (mdp.getup_ref_phase). Lying-on-the-front starts are left out.
+# =============================================================================
+GETUP_SUPINE_ARMS_TASK_ID = "Mjlab-Getup-Supine-QddBipedArms"
+GETUP_SUPINE_RESIDUAL_SCALE = 0.5  # rad per action unit (the from-scratch get-up: 0.75)
+GETUP_SUPINE_INIT_STD = 0.3  # start near the feed-forward alone
+GETUP_SUPINE_EPISODE_S = 8.0  # the motion takes 4.9 s, then standing
+GETUP_SUPINE_RESIDUAL_WEIGHT = -0.02  # |a|^2: stay on the feed-forward unless it pays
+GETUP_SUPINE_KIND_PROBS = {
+    "push": 0.1,
+    "stride": 0.1,
+    "drop": 0.1,
+    "crouch": 0.1,
+    "path": 0.25,
+    "bridge_supine": 0.35,
+}
+
+
+def make_qdd_biped_getup_supine_arms_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+    from mjlab.managers import ObservationTermCfg, RewardTermCfg
+
+    from mjlab_microduck.tasks import mdp as microduck_mdp
+
+    cfg = make_qdd_biped_getup_arms_env_cfg(play=play)
+    old = cfg.actions["joint_pos"]
+    cfg.actions["joint_pos"] = microduck_mdp.GetupReferenceJointPositionActionCfg(
+        entity_name=old.entity_name,
+        actuator_names=old.actuator_names,
+        scale=GETUP_SUPINE_RESIDUAL_SCALE,
+        use_default_offset=False,
+        demo_path=str(rc.QDD_GETUP_ARMS_DEMO_NPZ),
+    )
+    cfg.episode_length_s = GETUP_SUPINE_EPISODE_S
+    reset = cfg.events["reset_getup"]
+    reset.params["kind_probs"] = dict(GETUP_SUPINE_KIND_PROBS)
+    reset.params["supine_only"] = True
+    phase = ObservationTermCfg(func=microduck_mdp.getup_ref_phase)
+    cfg.observations["actor"].terms["ref_phase"] = phase
+    cfg.observations["critic"].terms["ref_phase"] = deepcopy(phase)
+    cfg.rewards["residual"] = RewardTermCfg(
+        func=microduck_mdp.skill_residual_l2, weight=GETUP_SUPINE_RESIDUAL_WEIGHT
+    )
+    return cfg
+
+
+# =============================================================================
 # Policy I/O of the get-up with arms (robot/qdd_biped/policy_io_getup_arms.json).
 # Regenerate with  uv run python -m mjlab_microduck.tasks.qdd_biped_arms
 # =============================================================================
@@ -385,6 +437,55 @@ def getup_arms_policy_io_onnx_metadata() -> dict[str, str]:
     import hashlib
 
     text = rc.QDD_GETUP_ARMS_POLICY_IO_JSON.read_text(encoding="utf-8")
+    return {"policy_io": text, "policy_io_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()}
+
+
+def build_getup_supine_arms_policy_io() -> dict:
+    """The get-up-with-arms contract + the reference clock obs and the open-loop
+    reference (generated, not a committed file)."""
+    import numpy as np
+
+    io = build_getup_arms_policy_io()
+    io["task"] = GETUP_SUPINE_ARMS_TASK_ID
+    io["kind"] = "getup_ref"
+    obs = io["observation"]
+    obs["terms"].append(
+        {
+            "name": "ref_phase",
+            "start": obs["dim"],
+            "size": 2,
+            "source": "getup_ref_phase",
+            "units": "-",
+            "description": "s = reference clock / reference.t_end_s (0..1, 1 after the end): [sin(pi s), cos(pi s)]",
+        }
+    )
+    obs["dim"] += 2
+    dd = np.load(rc.QDD_GETUP_ARMS_DEMO_NPZ)
+    names = [str(n) for n in dd["joint_names"]]
+    order = [names.index(n) for n in io["action"]["joint_order"]]
+    durs = [float(x) for x in dd["ref_durs_s"]]
+    io["action"]["scale"] = GETUP_SUPINE_RESIDUAL_SCALE
+    io["action"]["target"] = "q_target = reference(clock) + scale * action"
+    io["reference"] = {
+        "prep_s": float(dd["ref_prep_s"]),
+        "keys_rad": [[float(v) for v in k[order]] for k in dd["ref_keys"]],
+        "durs_s": durs,
+        "t_end_s": float(dd["ref_prep_s"]) + sum(durs),
+        "rule": "clock 0 at the start: ramp linearly from the start joint positions to keys_rad[0] in "
+        "prep_s, then from each key to the next in durs_s, then hold keys_rad[-1]; the clock advances "
+        "every control step",
+    }
+    io["getup"]["episode_length_s"] = GETUP_SUPINE_EPISODE_S
+    io["getup"]["note"] = (
+        "supine only (from lying on the front, roll over to supine first); " + io["getup"]["note"]
+    )
+    return io
+
+
+def getup_supine_arms_policy_io_onnx_metadata() -> dict[str, str]:
+    import hashlib
+
+    text = json.dumps(build_getup_supine_arms_policy_io(), indent=2) + "\n"
     return {"policy_io": text, "policy_io_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()}
 
 

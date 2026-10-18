@@ -224,3 +224,24 @@ def test_elbow_bends_forward_shoulder_minus_is_forward():
     assert (hand_x(0.0, 1.0) > 0.1).all()
     assert (hand_x(-0.5, 0.0) > 0.1).all()
     assert (hand_x(0.5, 0.0) < -0.1).all()
+
+
+def test_getup_supine_task_cfg_and_policy_io():
+    """Supine get-up with arms: residual on the found motion, the reference clock
+    observed, no lying-on-the-front starts, the reference in the policy_io."""
+    from mjlab_microduck.tasks import mdp as M
+    from mjlab_microduck.tasks import qdd_biped_arms as A
+
+    cfg = A.make_qdd_biped_getup_supine_arms_env_cfg()
+    act = cfg.actions["joint_pos"]
+    assert isinstance(act, M.GetupReferenceJointPositionActionCfg) and not act.zero_residual
+    assert "ref_phase" in cfg.observations["actor"].terms
+    assert cfg.events["reset_getup"].params["supine_only"] is True
+    assert "bridge_prone" not in cfg.events["reset_getup"].params["kind_probs"]
+    assert cfg.rewards["residual"].weight < 0  # skill_residual_l2 is a cost (>= 0)
+    io = A.build_getup_supine_arms_policy_io()
+    assert io["observation"]["dim"] == 50 and io["action"]["dim"] == 14
+    ref = io["reference"]
+    assert len(ref["keys_rad"]) == len(ref["durs_s"]) + 1 and all(len(k) == 14 for k in ref["keys_rad"])
+    # the reference ends standing in the default pose
+    assert np.allclose(ref["keys_rad"][-1], io["action"]["default_joint_pos"], atol=1e-5)

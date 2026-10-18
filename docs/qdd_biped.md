@@ -220,3 +220,18 @@ python3 bench_duck.py --task Mjlab-Velocity-Flat-QddBiped --envs 64 --iters 5
 - 関節の並びは脚 10 個のあと `l_shoulder_pitch, l_elbow, r_shoulder_pitch, r_elbow`。どれもピッチ軸なので、左右反転は入れ替えだけで符号は変えない。
 - 起き上がりの転倒姿勢は `scripts/qdd_getup_states.py --arms`（`getup_states_arms.npz`）、手本は探索で見つけた仰向けからの起き上がり（`scripts/qdd_getup_search/export_arms_demo.py` → `getup_demo_traj_arms.npz`）。うつ伏せの手本はない（腕なしの手本は腕があると立てない）ので、うつ伏せの橋渡しの開始姿勢も使わない。
 - 腕を下に垂らしたまま既定姿勢で立たせると、胴体が後ろに約 8.7° 傾く（腕なしは 4.5°、20 cm の腕で測った値）。方策が直す。
+
+### 仰向けからの起き上がり（見つけた動き＋修正、10/19）
+
+OTLさんの方針（10/19 朝）: うつ伏せからは寝返りで仰向けになってから起き上がる。仰向けからの学習は続ける。
+
+- arms4/5_getup（手本は報酬だけ）は、本当に倒れた姿勢から一度も立てなかった。
+- 新しい課題 `Mjlab-Getup-Supine-QddBipedArms`（`tasks/qdd_biped_arms.py`）は、探索で見つけた関節目標の列（`getup_demo_traj_arms.npz` の `ref_keys` / `ref_durs_s` / `ref_prep_s`、sd010 の結果、探索モデルで 29/32）をそのまま流し、方策はその上に修正（0.5 rad × 行動）を足すだけにした（`mdp.GetupReferenceJointPositionAction`）。
+  - 観測は 50 次元で、腕つき起き上がりの 48 次元に、手本の時計 `[sin(pi s), cos(pi s)]` を足したもの。
+  - うつ伏せの開始姿勢は使わない（`supine_only`）。
+  - policy_io には手本そのもの（`reference`）が入る。実機のコントローラは、同じ時計で手本を流して修正を足す。
+- 学習用のシミュレーションで修正なし（`scripts/eval_qdd_getup_supine.py zero`）で流した結果:
+  - 寝た姿勢からは、上体が起きてしゃがんだところ（2.4〜3.3 秒、傾き 10° 以内）まで行くが、最後に立ち上がるところで後ろに倒れて、立てたのは 0。
+  - 手本の途中からは 50% 立てた。
+  - 修正で最後のバランスを直すのが学習の役目。
+- 寝返り（うつ伏せ → 仰向け）は `gpu_cem.py --face prone --goal supine` で探す。

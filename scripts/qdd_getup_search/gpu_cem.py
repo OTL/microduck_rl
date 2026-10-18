@@ -353,6 +353,7 @@ class Search:
         T = prep + durs.sum(1).max().item() + a.hold
         n = int(T / DT)
         prog = torch.zeros(W, device=self.dev)
+        prog_roll = torch.full((W,), -1.0, device=self.dev)  # best torso-front-up on the way
         spin = torch.zeros(W, device=self.dev)  # peak torso angular speed
         rows = []
         ar = torch.arange(W, device=self.dev)
@@ -385,11 +386,29 @@ class Search:
                 prog = torch.maximum(
                     prog, up * torch.clamp(d.qpos[:, 2] / rc.STAND_BASE_Z, max=1.0)
                 )
+                prog_roll = torch.maximum(prog_roll, d.xmat[:, 1, 2, 0])
                 if record is not None and i % 10 == 0:
                     rows.append(d.qpos[record].cpu().numpy().copy())
         up = d.xmat[:, 1, 2, 2]
         z = d.qpos[:, 2]
         bad = ~torch.isfinite(d.qpos).all(1)
+        if getattr(a, "goal", "stand") == "supine":
+            # roll over onto the back (OTL 2026-10-19: from prone, roll to supine, then the
+            # supine get-up): torso x axis (front) pointing up, at rest at the end
+            front_up = d.xmat[:, 1, 2, 0]
+            rest = d.qvel[:, :6].norm(dim=1)
+            ok = (front_up > 0.8) & (rest < 0.3) & ~bad
+            s = (
+                front_up
+                + prog_roll
+                - 0.5 * rest.clamp(max=6)
+                - a.spin_w * torch.clamp(spin - a.spin_free, min=0)
+                + 2 * ok.float()
+            )
+            s = torch.where(bad, torch.full_like(s, -10.0), s)
+            if record is not None:
+                return np.array(rows), ok[record].item()
+            return s.view(P, ns).mean(1), ok.view(P, ns).float().mean(1)
         ok = (up > 0.9) & ((z - rc.STAND_BASE_Z).abs() < 0.03) & ~bad
         s = (
             up
@@ -455,6 +474,12 @@ def main():
     ap.add_argument("--face", default="prone", choices=("prone", "supine"))
     ap.add_argument("--arm-len", type=float, default=0.20)
     ap.add_argument("--elbow", action="store_true")
+    ap.add_argument(
+        "--goal",
+        default="stand",
+        choices=("stand", "supine"),
+        help="stand up, or roll over onto the back (from --face prone)",
+    )
     ap.add_argument(
         "--cad", action="store_true", help="the CAD v2 arm of the training model (sets --arm-len 0.25 --elbow)"
     )
