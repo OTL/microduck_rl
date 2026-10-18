@@ -186,7 +186,8 @@
         2.36
       ]
     ],
-    "knee_max_note": "pose-dependent knee limit knee_max(hip_pitch) from robot/model.py (80/90/100/110/120 deg for hip_pitch > 0/-15/-30/-45/else deg) must be enforced by the safety layer"
+    "knee_max_note": "pose-dependent knee limit knee_max(hip_pitch) from robot/model.py (80/90/100/110/120 deg for hip_pitch > 0/-15/-30/-45/else deg) must be enforced by the safety layer",
+    "torque_speed_envelope": "trained with the motors' torque-speed envelope on every joint (actuator/qdd_motor.py: GIM6010-8 FOC voltage limit, GIM3510-8 linear to 0 at 42.4 rad/s x V / 24) and with the motor housings colliding with the robot itself"
   },
   "observation": {
     "dim": 48,
@@ -253,7 +254,8 @@
     "note": "trained from resting poses after falls (fall check -> damping), flat floor only; last action = zeros at the start; hand over to the walking policy in the default pose"
   },
   "arms": {
-    "note": "design-study arms (robot/qdd_biped_constants.py add_arms): not in the robot repo's model yet",
-    "motor": "GIM3510-8"
+    "note": "arms (robot/qdd_biped_constants.py add_arms, CAD v2): not in the robot repo's model yet",
+    "motor": "GIM3510-8",
+    "length_m": 0.25
   }
 }

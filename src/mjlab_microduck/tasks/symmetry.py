@@ -244,3 +244,66 @@ def qdd_biped_symmetry(env, obs: TensorDict | None, actions: torch.Tensor | None
         _, _, act_perm, act_sign = _qdd_tensors(actions.device)
         aug_actions = torch.cat([actions, actions[:, act_perm] * act_sign], dim=0)
     return aug_obs, aug_actions
+
+
+# ---------------------------------------------------------------------------
+# QDD biped WITH ARMS (tasks/qdd_biped_arms.py): 14 joints = the 10 leg joints
+# + l_shoulder_pitch, l_elbow, r_shoulder_pitch, r_elbow (pitch axes: the arms
+# swap with no sign change). Same layout as the 41-D table with 14 per joint term:
+#   [0:3] base_ang_vel  [3:6] projected_gravity  [6:20] joint_pos  [20:34] joint_vel
+#   [34:48] last_action  [48:51] twist command  [51:53] gait_phase   (53-D)
+# ---------------------------------------------------------------------------
+QDD_ARMS_JOINT_PERM: list[int] = QDD_JOINT_PERM + [12, 13, 10, 11]
+QDD_ARMS_JOINT_SIGN: list[float] = QDD_JOINT_SIGN + [1.0] * 4
+_NJ_ARMS = len(QDD_ARMS_JOINT_PERM)
+QDD_ARMS_OBS_PERM: list[int] = (
+    [0, 1, 2]
+    + [3, 4, 5]
+    + [6 + j for j in QDD_ARMS_JOINT_PERM]
+    + [6 + _NJ_ARMS + j for j in QDD_ARMS_JOINT_PERM]
+    + [6 + 2 * _NJ_ARMS + j for j in QDD_ARMS_JOINT_PERM]
+    + [6 + 3 * _NJ_ARMS + k for k in range(3)]
+    + [9 + 3 * _NJ_ARMS, 10 + 3 * _NJ_ARMS]
+)
+QDD_ARMS_OBS_SIGN: list[float] = (
+    [-1.0, 1.0, -1.0]
+    + [1.0, -1.0, 1.0]
+    + QDD_ARMS_JOINT_SIGN * 3
+    + [1.0, -1.0, -1.0]
+    + [-1.0, -1.0]
+)
+
+QDD_ARMS_SYMMETRY_CFG = {
+    **QDD_SYMMETRY_CFG,
+    "data_augmentation_func": "mjlab_microduck.tasks.symmetry.qdd_biped_arms_symmetry",
+}
+
+_qdd_arms_cache: dict[torch.device, tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = {}
+
+
+def qdd_biped_arms_symmetry(env, obs: TensorDict | None, actions: torch.Tensor | None):
+    """qdd_biped_symmetry for the 14-joint policies with arms (53-D actor obs)."""
+    dev = (obs["actor"] if obs is not None else actions).device
+    if dev not in _qdd_arms_cache:
+        _qdd_arms_cache[dev] = (
+            torch.tensor(QDD_ARMS_OBS_PERM, dtype=torch.long, device=dev),
+            torch.tensor(QDD_ARMS_OBS_SIGN, dtype=torch.float32, device=dev),
+            torch.tensor(QDD_ARMS_JOINT_PERM, dtype=torch.long, device=dev),
+            torch.tensor(QDD_ARMS_JOINT_SIGN, dtype=torch.float32, device=dev),
+        )
+    obs_perm, obs_sign, act_perm, act_sign = _qdd_arms_cache[dev]
+    aug_obs = aug_actions = None
+    if obs is not None:
+        actor, critic = obs["actor"], obs["critic"]
+        assert actor.shape[1] == len(QDD_ARMS_OBS_PERM), actor.shape
+        aug_obs = TensorDict(
+            {
+                "actor": torch.cat([actor, actor[:, obs_perm] * obs_sign], dim=0),
+                "critic": torch.cat([critic, critic], dim=0),
+            },
+            batch_size=[actor.shape[0] * 2],
+            device=actor.device,
+        )
+    if actions is not None:
+        aug_actions = torch.cat([actions, actions[:, act_perm] * act_sign], dim=0)
+    return aug_obs, aug_actions

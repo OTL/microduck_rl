@@ -9405,16 +9405,30 @@ class SkillReferenceJointPositionAction(_JointAction):
         pdt = env.physics_dt
         n_sub = (sk.n + 1) * self._dec
         t = np.arange(n_sub) * pdt
-        order = [QDD_JOINT_NAMES.index(nm) for nm in self._target_names]
+        # joints the table does not have (the arms, tasks/qdd_biped_arms.py): reference = the
+        # default pose at rest (q = default, dq = tau_ff = 0) and the full residual.
+        names = list(self._target_names)
+        known = [k for k, nm in enumerate(names) if nm in QDD_JOINT_NAMES]
+        order = [QDD_JOINT_NAMES.index(names[k]) for k in known]
+        default = self._entity.data.default_joint_pos[0, self._target_ids].detach().cpu().numpy()
         f = lambda a: torch.tensor(np.asarray(a, dtype=np.float32), device=self.device)  # noqa: E731
-        self.ref_q = f(qdd_skill.sample_table(table, t, "q")[:, order])
-        self.ref_dq = f(qdd_skill.sample_table(table, t, "dq")[:, order])
-        self.ref_tau = f(qdd_skill.sample_table(table, t, "tau_ff")[:, order])
+
+        def full(key, fill):
+            out = np.tile(np.asarray(fill, dtype=np.float64), (n_sub, 1))
+            out[:, known] = qdd_skill.sample_table(table, t, key)[:, order]
+            return out
+
+        self.ref_q = f(full("q", default))
+        self.ref_dq = f(full("dq", np.zeros(len(names))))
+        self.ref_tau = f(full("tau_ff", np.zeros(len(names))))
         self.ref_res = f(qdd_skill.sample_table(table, t, "residual_scale"))
         if table.get("residual_scale_joints") is not None:
             # per-joint factor (e.g. the hip pitch residual shrinks near its -100 deg limit)
-            self.ref_rsj = f(qdd_skill.sample_table({"dt": table["dt"], "rsj": table["residual_scale_joints"]}, t,
-                                                    "rsj")[:, order])
+            rsj = np.ones((n_sub, len(names)))
+            rsj[:, known] = qdd_skill.sample_table(
+                {"dt": table["dt"], "rsj": table["residual_scale_joints"]}, t, "rsj"
+            )[:, order]
+            self.ref_rsj = f(rsj)
         else:
             self.ref_rsj = torch.ones_like(self.ref_q)
         self._n_sub = n_sub
@@ -9503,7 +9517,8 @@ def qdd_bus_current(env: ManagerBasedRlEnv, asset: Entity, v_bus: float = 22.0) 
     cache = env.__dict__.setdefault("_qdd_ankle_mask", {})
     if id(asset) not in cache:
         cache[id(asset)] = torch.tensor(
-            [n.endswith("ankle_pitch") for n in asset.joint_names], device=env.device
+            # GIM3510-8: the ankles and the arms (tasks/qdd_biped_arms.py)
+            [n.endswith(("ankle_pitch", "shoulder_pitch", "elbow")) for n in asset.joint_names], device=env.device
         )
     ankle = cache[id(asset)]
     tau = asset.data.qfrc_actuator

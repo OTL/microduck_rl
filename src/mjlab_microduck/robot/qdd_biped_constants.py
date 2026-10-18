@@ -164,6 +164,12 @@ def knee_max(hip_pitch_rad: float) -> float:
 # analysis/fall_sim.py uses the CAD meshes; check a trained get-up there.
 # =============================================================================
 GETUP_FLOOR_BIT = 2
+# 2026-10-18 (OTL: limbs went through each other in the get-up videos): the motor
+# housings and the torso top collide with the robot too, not only the floor
+# (legs through the other leg's / the torso's motors, arms through the hips).
+# None of them touch in the standing pose (tests/test_qdd_arms.py).
+GETUP_SELF_CONTYPE = 1 | GETUP_FLOOR_BIT
+GETUP_SELF_CONAFFINITY = 1
 # Fallen-state library (scripts/qdd_getup_states.py): resting poses after falls.
 QDD_GETUP_POLICY_IO_JSON: Path = Path(os.path.dirname(__file__)) / "qdd_biped" / "policy_io_getup.json"
 QDD_GETUP_STATES_NPZ: Path = Path(os.path.dirname(__file__)) / "qdd_biped" / "getup_states.npz"
@@ -177,7 +183,7 @@ BODY_FRICTION = 0.6  # PA12 / TPU covers on a floor (randomised in the get-up en
 
 
 def add_getup_collision_geoms(spec: mujoco.MjSpec, bodies=None) -> list[str]:
-    """Add floor-only collision shapes for the motor housings and the rabbit top
+    """Add collision shapes (floor and robot) for the motor housings and the rabbit top
     (see above), on every body or only on ``bodies`` (names). Returns the names
     of the added geoms."""
     added: list[str] = []
@@ -198,8 +204,8 @@ def add_getup_collision_geoms(spec: mujoco.MjSpec, bodies=None) -> list[str]:
                 type=mujoco.mjtGeom.mjGEOM_CYLINDER,
                 fromto=list(g.fromto),
                 size=list(g.size),
-                contype=GETUP_FLOOR_BIT,
-                conaffinity=0,
+                contype=GETUP_SELF_CONTYPE,
+                conaffinity=GETUP_SELF_CONAFFINITY,
                 condim=3,
                 priority=1,
                 friction=(BODY_FRICTION, 0.02, 0.01),
@@ -215,8 +221,8 @@ def add_getup_collision_geoms(spec: mujoco.MjSpec, bodies=None) -> list[str]:
                 type=mujoco.mjtGeom.mjGEOM_BOX,
                 pos=list(pos),
                 size=list(half),
-                contype=GETUP_FLOOR_BIT,
-                conaffinity=0,
+                contype=GETUP_SELF_CONTYPE,
+                conaffinity=GETUP_SELF_CONAFFINITY,
                 condim=3,
                 priority=1,
                 friction=(BODY_FRICTION, 0.02, 0.01),
@@ -238,8 +244,8 @@ def get_qdd_biped_getup_spec() -> mujoco.MjSpec:
 _FLOOR_ONLY = r"^(.*_motor\d+_collision|torso_top_collision)$"
 GETUP_COLLISION = CollisionCfg(
     geom_names_expr=(r".*_collision",),
-    contype={_FLOOR_ONLY: GETUP_FLOOR_BIT, r".*_collision": 1},
-    conaffinity={_FLOOR_ONLY: 0, r".*_collision": 1},
+    contype={_FLOOR_ONLY: GETUP_SELF_CONTYPE, r".*_collision": 1},
+    conaffinity={_FLOOR_ONLY: GETUP_SELF_CONAFFINITY, r".*_collision": 1},
     condim={r".*_collision": 3},
     priority={r".*_collision": 1},
     friction={r"^(l|r)_foot_collision$": (0.8,), r".*_collision": (BODY_FRICTION,)},
@@ -336,6 +342,7 @@ ARM_ELBOW_RANGE = (0.0, 2.36)  # rad; + bends the forearm forward
 ARM_MOTOR = dict(mass=0.26, radius=0.023, half_len=0.0265, armature=1.0e-5 * 8**2)  # GIM3510-8
 ARM_PEAK = 6.28
 ARM_KP, ARM_KD = 30.0, 0.6
+ARM_JOINT_DAMPING = 0.05  # passive (bearing / seal), on top of the PD's kd
 
 
 def add_arms(spec: mujoco.MjSpec) -> mujoco.MjSpec:
@@ -345,7 +352,13 @@ def add_arms(spec: mujoco.MjSpec) -> mujoco.MjSpec:
     for s, nm in ((1, "l"), (-1, "r")):
         sx, sy, sz = ARM_SHOULDER_POS
         arm = torso.add_body(name=f"{nm}_upper_arm", pos=[sx, s * sy, sz])
-        jopt = dict(type=mujoco.mjtJoint.mjJNT_HINGE, axis=[0, 1, 0], armature=mm["armature"], damping=0.05, frictionloss=0.05)
+        jopt = dict(
+            type=mujoco.mjtJoint.mjJNT_HINGE,
+            axis=[0, 1, 0],
+            armature=mm["armature"],
+            damping=ARM_JOINT_DAMPING,
+            frictionloss=0.05,
+        )
         arm.add_joint(name=f"{nm}_shoulder_pitch", range=list(ARM_SHOULDER_RANGE), **jopt)
         fore = arm.add_body(name=f"{nm}_forearm", pos=[0, 0, -ARM_UPPER])
         fore.add_joint(name=f"{nm}_elbow", range=list(ARM_ELBOW_RANGE), **jopt)
@@ -395,6 +408,16 @@ def add_arms(spec: mujoco.MjSpec) -> mujoco.MjSpec:
     return spec
 
 
+def add_arm_implicit_kd(spec: mujoco.MjSpec) -> mujoco.MjSpec:
+    """The arm PD's kd as joint damping (MuJoCo integrates it implicitly): use with
+    the envelope arm actuator of arm_actuator_like (damping 0 there)."""
+    for n in QDD_ARM_JOINT_NAMES:
+        d = list(spec.joint(n).damping)
+        d[0] = ARM_JOINT_DAMPING + ARM_KD
+        spec.joint(n).damping = d
+    return spec
+
+
 def get_qdd_biped_arms_spec() -> mujoco.MjSpec:
     return add_arms(get_qdd_biped_spec())
 
@@ -439,7 +462,10 @@ def arm_actuator_like(first) -> object:
 
     names = (r".*_shoulder_pitch", r".*_elbow")
     if isinstance(first, QddMotorActuatorCfg):
-        return replace(first, target_names_expr=names, stiffness=ARM_KP, damping=ARM_KD, effort_limit=ARM_PEAK, motor="3510")
+        # kd in the joint (implicit, add_arm_implicit_kd), not in the explicit PD: the
+        # forearm (~1.1e-3 kg m2 with the rotor) chatters at 15 rad/s with an explicit kd
+        # 0.6 at 5 ms physics. Same torque while braking (the envelope allows t_lim there).
+        return replace(first, target_names_expr=names, stiffness=ARM_KP, damping=0.0, effort_limit=ARM_PEAK, motor="3510")
     return replace(
         QDD_ACTUATOR_ARM,
         delay_min_lag=getattr(first, "delay_min_lag", 0),

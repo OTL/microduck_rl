@@ -302,7 +302,11 @@ def sample_path_states(path: Path, n: int, seed: int, m: mujoco.MjModel):
     frames = [np.flatnonzero(demo == k) for k in np.unique(demo)]
     remain = path_remain_s(demo)
     rows = []
-    for _ in range(n):
+    tries = 0
+    while len(rows) < n:
+        tries += 1
+        if tries > 20 * n:
+            raise SystemExit(f"path states: only {len(rows)} of {n} without self-penetration")
         i = rng.choice(frames[rng.integers(len(frames))])  # each demo equally often
         q, v = Q[i].copy(), V[i].copy()
         d.qpos[:] = q
@@ -319,6 +323,8 @@ def sample_path_states(path: Path, n: int, seed: int, m: mujoco.MjModel):
         d.qpos[:] = q
         q[2] += _floor_lift(m, d)  # a demo made on another arm length can go into the floor
         d.qpos[:] = q
+        if _self_penetration(m, d) > 0.003:
+            continue  # e.g. the 20 cm demo's forearm in the thigh with the 25 cm arms
         mujoco.mj_kinematics(m, d)
         rows.append(
             (float(q[2]), q[3:7].copy(), q[7:].copy(), _tilt_deg(d), vw[:6].copy(), vw[6:].copy(), float(remain[i]), int(i))
@@ -335,6 +341,16 @@ def _floor_lift(m: mujoco.MjModel, d: mujoco.MjData, tol: float = 0.002) -> floa
         if m.geom_bodyid[c.geom1] == 0 or m.geom_bodyid[c.geom2] == 0:
             pen = min(pen, float(c.dist))
     return max(0.0, -pen - tol)
+
+
+def _self_penetration(m: mujoco.MjModel, d: mujoco.MjData) -> float:
+    """Deepest robot-robot penetration [m] (0 when none)."""
+    mujoco.mj_forward(m, d)
+    pen = 0.0
+    for c in d.contact[: d.ncon]:
+        if m.geom_bodyid[c.geom1] != 0 and m.geom_bodyid[c.geom2] != 0:
+            pen = min(pen, float(c.dist))
+    return -pen
 
 
 def _yaw_free(quat: np.ndarray) -> np.ndarray:

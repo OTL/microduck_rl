@@ -26,14 +26,14 @@ def test_arms_model_joints_and_mass():
         assert {f"{s}_upper_arm_collision", f"{s}_forearm_collision"} <= geoms
 
 
-def test_getup_arms_model_has_floor_only_arm_motors():
+def test_getup_arms_model_arm_motors_collide():
     m = rc.get_qdd_biped_getup_arms_spec().compile()
     names = [m.geom(i).name for i in range(m.ngeom)]
     motors = [n for n in names if n.startswith(rc.QDD_ARM_BODIES) and "_motor" in n]
     assert len(motors) == 4
     for n in motors:
         g = m.geom(n)
-        assert g.contype == rc.GETUP_FLOOR_BIT and g.conaffinity == 0
+        assert g.contype == rc.GETUP_SELF_CONTYPE and g.conaffinity == rc.GETUP_SELF_CONAFFINITY
 
 
 def test_arm_actuator_follows_the_leg_style():
@@ -41,7 +41,7 @@ def test_arm_actuator_follows_the_leg_style():
 
     env = rc.arm_actuator_like(rc.qdd_envelope_actuators()[0])
     assert isinstance(env, QddMotorActuatorCfg) and env.motor == "3510"
-    assert env.stiffness == rc.ARM_KP and env.effort_limit == rc.ARM_PEAK
+    assert env.stiffness == rc.ARM_KP and env.effort_limit == rc.ARM_PEAK and env.damping == 0.0  # kd in the joint
     builtin = rc.arm_actuator_like(rc.QDD_ACTUATOR_HIP_YAW_ROLL)
     assert not isinstance(builtin, QddMotorActuatorCfg)
     assert builtin.target_names_expr == (r".*_shoulder_pitch", r".*_elbow")
@@ -51,19 +51,58 @@ def test_arm_actuator_follows_the_leg_style():
     "factory",
     ["make_qdd_biped_velocity_arms_env_cfg", "make_qdd_biped_rough_arms_env_cfg", "make_qdd_biped_jump_arms_env_cfg"],
 )
-def test_held_variants_keep_the_leg_policy(factory):
+def test_arms_variants_have_the_arms_in_the_policy(factory):
+    from mjlab_microduck.actuator.qdd_motor import QddMotorActuatorCfg
     from mjlab_microduck.tasks import qdd_biped_arms as A
 
     cfg = getattr(A, factory)()
-    assert tuple(cfg.actions["joint_pos"].actuator_names) == rc.QDD_LEG_JOINT_EXPR
-    for group in cfg.observations.values():
-        for name in ("joint_pos", "joint_vel"):
-            if name in group.terms:
-                assert tuple(group.terms[name].params["asset_cfg"].joint_names) == rc.QDD_LEG_JOINT_EXPR
+    names = cfg.actions["joint_pos"].actuator_names
+    assert tuple(names) != rc.QDD_LEG_JOINT_EXPR  # not restricted to the legs
     robot = cfg.scene.entities["robot"]
-    assert robot.articulation.actuators[-1].target_names_expr == (r".*_shoulder_pitch", r".*_elbow")
+    acts = robot.articulation.actuators
+    assert acts[-1].target_names_expr == (r".*_shoulder_pitch", r".*_elbow")
+    # torque-speed envelope on every joint, the arms as GIM3510-8
+    assert all(isinstance(a, QddMotorActuatorCfg) for a in acts) and acts[-1].motor == "3510"
     m = robot.spec_fn().compile()
     assert m.nq == 7 + 14
+    # motor housings collide with the robot too
+    motors = [m.geom(i) for i in range(m.ngeom) if "_motor" in m.geom(i).name and m.geom(i).name.endswith("_collision")]
+    assert motors and all(g.contype[0] & 1 and g.conaffinity[0] & 1 for g in motors)
+    if "pose" in cfg.rewards:
+        std = cfg.rewards["pose"].params["std_walking"]
+        assert std[r".*_shoulder_pitch"] > 0 and std[r".*_elbow"] > 0
+    else:
+        assert cfg.rewards["arm_pose"].weight > 0
+
+
+def test_arms_symmetry_round_trip():
+    import torch
+    from tensordict import TensorDict
+
+    from mjlab_microduck.tasks import symmetry as S
+
+    obs = torch.randn(5, len(S.QDD_ARMS_OBS_PERM))
+    td = TensorDict({"actor": obs, "critic": torch.randn(5, 3)}, batch_size=[5])
+    act = torch.randn(5, 14)
+    o, a = S.qdd_biped_arms_symmetry(None, td, act)
+    mo, ma = o["actor"][5:], a[5:]
+    td2 = TensorDict({"actor": mo, "critic": torch.randn(5, 3)}, batch_size=[5])
+    o2, a2 = S.qdd_biped_arms_symmetry(None, td2, ma)
+    assert torch.allclose(o2["actor"][5:], obs) and torch.allclose(a2[5:], act)
+    # the arm actions swap l <-> r with no sign change
+    assert torch.equal(ma[:, 10:], act[:, [12, 13, 10, 11]])
+    assert len(S.QDD_ARMS_OBS_PERM) == 53 and sorted(S.QDD_ARMS_OBS_PERM) == list(range(53))
+
+
+@pytest.mark.parametrize("task", ["Mjlab-Velocity-Flat-QddBipedArms", "Mjlab-Skill-Hop-QddBipedArms"])
+def test_arms_policy_io(task):
+    from mjlab_microduck.tasks import qdd_biped_arms as A
+
+    io = json.loads(A.arms_policy_io_onnx_metadata(task)["policy_io"])
+    assert io["action"]["dim"] == 14 and io["action"]["joint_order"] == list(rc.QDD_ARMS_JOINT_NAMES)
+    assert io["observation"]["dim"] == 53 == io["onnx"]["input"]["shape"][1]
+    sizes = {t["name"]: t["size"] for t in io["observation"]["terms"]}
+    assert sizes["joint_pos"] == sizes["joint_vel"] == sizes["actions"] == 14
 
 
 def test_getup_arms_cfg_and_policy_io():
@@ -108,3 +147,22 @@ def test_states_mirror_swaps_the_arms():
     assert list(out[10:]) == [13, 14, 11, 12]  # l arm <- r arm, no sign change
     assert list(out[:5]) == [-6, -7, 8, 9, 10]  # l leg <- r leg, hip yaw / roll negated
     assert np.allclose(S._swap_lr(out), j)
+
+
+def test_no_self_contact_when_standing():
+    """With the motor housings colliding with the robot (2026-10-18), the standing
+    pose and the arms hanging down must not touch anything of the robot itself."""
+    import re
+
+    import mujoco
+
+    m = rc.get_qdd_biped_getup_arms_spec().compile()
+    d = mujoco.MjData(m)
+    d.qpos[2], d.qpos[3] = 1.0, 1.0  # in the air: robot-robot contacts only
+    for j in range(1, m.njnt):
+        for k, v in rc.DEFAULT_JOINT_POS.items():
+            if re.fullmatch(k, m.joint(j).name):
+                d.qpos[m.jnt_qposadr[j]] = v
+    mujoco.mj_forward(m, d)
+    touching = [(m.geom(c.geom1).name, m.geom(c.geom2).name) for c in d.contact[: d.ncon] if c.dist < 0.0]
+    assert touching == []

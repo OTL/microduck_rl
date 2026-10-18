@@ -26,7 +26,7 @@ from mjlab_microduck.robot import qdd_biped_constants as rc
 # ---------------------------------------------------------------- collision model
 
 
-def test_getup_collision_geoms_touch_the_floor_only():
+def test_getup_collision_geoms_touch_the_floor_and_the_robot():
     m = rc.get_qdd_biped_getup_spec().compile()
     added = [m.geom(i).name for i in range(m.ngeom) if m.geom(i).name.endswith("_collision")]
     motors = [n for n in added if "_motor" in n and n.endswith("_collision") and "knee_motor_collision" not in n]
@@ -35,7 +35,7 @@ def test_getup_collision_geoms_touch_the_floor_only():
     assert "torso_top_collision" in added
     for n in motors + ["torso_top_collision"]:
         g = m.geom(n)
-        assert g.contype[0] == rc.GETUP_FLOOR_BIT and g.conaffinity[0] == 0
+        assert g.contype[0] == rc.GETUP_SELF_CONTYPE and g.conaffinity[0] == rc.GETUP_SELF_CONAFFINITY
         assert g.condim[0] == 3 and g.friction[0] > 0.0
     # walking model untouched
     m0 = rc.get_qdd_biped_spec().compile()

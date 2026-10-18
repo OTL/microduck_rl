@@ -202,11 +202,19 @@ python3 bench_duck.py --task Mjlab-Velocity-Flat-QddBiped --envs 64 --iters 5
 
 | 課題 | 腕 | 観測 / 行動 |
 |---|---|---|
-| `Mjlab-Velocity-Flat-QddBipedArms` | 腕は PD で 0（下に垂らす）に保つ | 41 / 10（腕なしと同じ。ONNX に `held_joints`） |
-| `Mjlab-Velocity-Rough-QddBipedArms` | 同上 | 41 / 10 |
-| `Mjlab-Skill-Hop-QddBipedArms` | 同上 | 41 / 10 |
+| `Mjlab-Velocity-Flat-QddBipedArms` | 方策が動かす（腕の姿勢はゆるい Gaussian、左右反転の mirror loss も腕つき） | 53 / 14（腕なしの policy_io に腕を足したものを ONNX に入れる） |
+| `Mjlab-Velocity-Rough-QddBipedArms` | 同上 | 53 / 14 |
+| `Mjlab-Skill-Hop-QddBipedArms` | 方策が動かす（脚は表の動き＋補正、腕の参照は 0、`arm_pose` 0.2） | 53 / 14 |
 | `Mjlab-Getup-QddBipedArms` | 方策が動かす | 48 / 14（`policy_io_getup_arms.json`） |
+
+10/18 夜（OTLさん「歩行などでは腕も使うようにして」「干渉とか速度とか変」）に、4 課題とも次のように変えた。
+
+- **腕を方策に入れた**: 歩行・不整地・ジャンプも 14 関節を動かす（それまでは腕を PD で 0 に固定）。
+- **モーターの速度とトルクの特性**: 全関節を `actuator/qdd_motor.py` の torque-speed envelope にした（腕は GIM3510-8）。それまでの起き上がりはトルクの上限で切るだけで、実機では出ない速さで振り回せた。電源電圧と強さの乱数化はジャンプと同じ。
+- **自分どうしの当たり判定**: モーターの外形と胴の上を、床だけでなくロボット自身とも当てる（`GETUP_SELF_CONTYPE`）。それまでは脚どうし・腕と脚がモーターをすり抜けていた（作り直す前の転倒ライブラリでは、左右の股のモーターが 36% の状態で重なっていた）。
+- **転倒ライブラリを作り直した**: 自分どうしの当たり判定ありで作り直し、手本に沿った path の状態は体がめり込むもの（20 cm の手本の前腕が 25 cm の腕では腿に入る）を捨てる。そのため path は寝た姿勢側が減った（tilt の中央値 53° → 42°）。寝た姿勢は bridge_supine と本物の転倒で補う。
+- **kd を関節の減衰に移した**（5 ms の物理）: envelope の PD は陽的なので、軽い前腕と宙に浮いた足首が 15 rad/s で小刻みに震えた。kd を MuJoCo の関節減衰（陰的に積分される）にすると止まる。ブレーキ側は envelope でも上限いっぱいまで出せるので、トルクは同じ。ジャンプ（2.5 ms）は電流の計算がアクチュエータのトルクを読むので脚は今のまま。
 
 - 関節の並びは脚 10 個のあと `l_shoulder_pitch, l_elbow, r_shoulder_pitch, r_elbow`。どれもピッチ軸なので、左右反転は入れ替えだけで符号は変えない。
 - 起き上がりの転倒姿勢は `scripts/qdd_getup_states.py --arms`（`getup_states_arms.npz`）、手本は探索で見つけた仰向けからの起き上がり（`scripts/qdd_getup_search/export_arms_demo.py` → `getup_demo_traj_arms.npz`）。うつ伏せの手本はない（腕なしの手本は腕があると立てない）ので、うつ伏せの橋渡しの開始姿勢も使わない。
-- 腕を下に垂らしたまま既定姿勢で立たせると、胴体が後ろに約 8.7° 傾く（腕なしは 4.5°）。方策が直す。
+- 腕を下に垂らしたまま既定姿勢で立たせると、胴体が後ろに約 8.7° 傾く（腕なしは 4.5°、20 cm の腕で測った値）。方策が直す。

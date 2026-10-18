@@ -488,22 +488,23 @@ register_mjlab_task(
 )
 
 
-# QDD biped WITH ARMS (tasks/qdd_biped_arms.py): walking, rough walking and the
-# jump with the arms held by their own PD (same 41-D obs / 10-D action as without
-# arms; the ONNX also carries "held_joints"), and the get-up with the arms in the
-# policy (48-D obs, 14-D action, policy_io_getup_arms.json).
+# QDD biped WITH ARMS (tasks/qdd_biped_arms.py): walking, rough walking, the jump
+# and the get-up, all with the arms in the policy (14-D action; 53-D obs, get-up
+# 48-D), torque-speed envelope actuators and self-colliding motor housings. The
+# ONNX carries the leg-only policy_io with the arms appended.
 from .qdd_biped_arms import (
     GETUP_ARMS_TASK_ID as _QDD_GETUP_ARMS_TASK_ID,
     JUMP_ARMS_TASK_ID as _QDD_JUMP_ARMS_TASK_ID,
     ROUGH_ARMS_TASK_ID as _QDD_ROUGH_ARMS_TASK_ID,
     VELOCITY_ARMS_TASK_ID as _QDD_VELOCITY_ARMS_TASK_ID,
+    arms_policy_io_onnx_metadata as _qdd_arms_policy_io_onnx_metadata,
     getup_arms_policy_io_onnx_metadata as _qdd_getup_arms_policy_io_onnx_metadata,
-    held_joints_onnx_metadata as _qdd_held_joints_onnx_metadata,
     make_qdd_biped_getup_arms_env_cfg,
     make_qdd_biped_jump_arms_env_cfg,
     make_qdd_biped_rough_arms_env_cfg,
     make_qdd_biped_velocity_arms_env_cfg,
 )
+from .symmetry import QDD_ARMS_SYMMETRY_CFG as _QDD_ARMS_SYMMETRY_CFG
 
 
 def _attach_onnx_metadata(runner, path: str, metadata_fn, tag: str) -> None:
@@ -517,20 +518,48 @@ def _attach_onnx_metadata(runner, path: str, metadata_fn, tag: str) -> None:
         print(f"[WARN] {tag} ONNX metadata failed: {e}")
 
 
-class QddBipedArmsHeldOnPolicyRunner(QddBipedOnPolicyRunner):
-    """Walking with arms held: the walking policy_io + held_joints."""
+class QddBipedArmsOnPolicyRunner(MicroduckOnPolicyRunner):
+    """Walking / rough walking with arms: the walking policy_io with the arms."""
 
     def save(self, path: str, infos=None):
         super().save(path, infos)
-        _attach_onnx_metadata(self, path, _qdd_held_joints_onnx_metadata, "held_joints")
+        _attach_onnx_metadata(
+            self, path, lambda: _qdd_arms_policy_io_onnx_metadata(_QDD_VELOCITY_ARMS_TASK_ID), "policy_io (arms)"
+        )
 
 
-class QddSkillArmsHeldOnPolicyRunner(QddSkillOnPolicyRunner):
-    """Jump with arms held: the skill metadata + held_joints."""
+class QddRoughArmsOnPolicyRunner(MicroduckOnPolicyRunner):
+    """Rough walking with arms: the walking policy_io with the arms."""
 
     def save(self, path: str, infos=None):
         super().save(path, infos)
-        _attach_onnx_metadata(self, path, _qdd_held_joints_onnx_metadata, "held_joints")
+        _attach_onnx_metadata(
+            self, path, lambda: _qdd_arms_policy_io_onnx_metadata(_QDD_ROUGH_ARMS_TASK_ID), "policy_io (arms)"
+        )
+
+
+class QddSkillArmsOnPolicyRunner(MicroduckOnPolicyRunner):
+    """Jump with arms: residual around the leg table from scratch (output layer
+    scaled like the leg-only feed-forward skill), the jump policy_io with the arms."""
+
+    def __init__(self, env, train_cfg: dict, log_dir=None, device="cpu", **kwargs):
+        super().__init__(env, train_cfg, log_dir, device, **kwargs)
+        import torch
+
+        from .qdd_biped_skill_env_cfg import REF_OUTPUT_INIT_GAIN
+
+        last = [m for m in self.alg.actor.modules() if isinstance(m, torch.nn.Linear)][-1]
+        with torch.no_grad():
+            last.weight.mul_(REF_OUTPUT_INIT_GAIN)
+            last.bias.zero_()
+        print(f"[skill arms] actor from scratch, output layer x {REF_OUTPUT_INIT_GAIN}")
+
+    def save(self, path: str, infos=None):
+        super().save(path, infos)
+        spec = self.env.unwrapped.command_manager.get_term("skill").spec
+        _attach_onnx_metadata(
+            self, path, lambda: _qdd_arms_policy_io_onnx_metadata(_QDD_JUMP_ARMS_TASK_ID, spec), "policy_io (arms)"
+        )
 
 
 class QddBipedGetupArmsOnPolicyRunner(MicroduckOnPolicyRunner):
@@ -541,28 +570,36 @@ class QddBipedGetupArmsOnPolicyRunner(MicroduckOnPolicyRunner):
         _attach_onnx_metadata(self, path, _qdd_getup_arms_policy_io_onnx_metadata, "policy_io (getup arms)")
 
 
+def _arms_rl(base, **kw):
+    alg = base.algorithm
+    sym = alg.symmetry_cfg
+    if sym is not None:
+        alg = replace(alg, symmetry_cfg=dict(_QDD_ARMS_SYMMETRY_CFG))
+    return replace(base, algorithm=alg, **kw)
+
+
 register_mjlab_task(
     task_id=_QDD_VELOCITY_ARMS_TASK_ID,
     env_cfg=make_qdd_biped_velocity_arms_env_cfg(),
     play_env_cfg=make_qdd_biped_velocity_arms_env_cfg(play=True),
-    rl_cfg=replace(QddBipedRlCfg, experiment_name="qdd_biped_arms", run_name="qdd_biped_arms"),
-    runner_cls=QddBipedArmsHeldOnPolicyRunner,
+    rl_cfg=_arms_rl(QddBipedRlCfg, experiment_name="qdd_biped_arms", run_name="qdd_biped_arms"),
+    runner_cls=QddBipedArmsOnPolicyRunner,
 )
 register_mjlab_task(
     task_id=_QDD_ROUGH_ARMS_TASK_ID,
     env_cfg=make_qdd_biped_rough_arms_env_cfg(),
     play_env_cfg=make_qdd_biped_rough_arms_env_cfg(play=True),
-    rl_cfg=replace(
+    rl_cfg=_arms_rl(
         QddBipedRlCfg, experiment_name="qdd_biped_rough_arms", run_name="qdd_biped_rough_arms", max_iterations=3_000
     ),
-    runner_cls=QddBipedArmsHeldOnPolicyRunner,
+    runner_cls=QddRoughArmsOnPolicyRunner,
 )
 register_mjlab_task(
     task_id=_QDD_JUMP_ARMS_TASK_ID,
     env_cfg=make_qdd_biped_jump_arms_env_cfg(),
     play_env_cfg=make_qdd_biped_jump_arms_env_cfg(play=True),
-    rl_cfg=replace(QddJumpRlCfg, experiment_name="qdd_jump_arms", run_name="qdd_jump_arms"),
-    runner_cls=QddSkillArmsHeldOnPolicyRunner,
+    rl_cfg=_arms_rl(QddJumpRlCfg, experiment_name="qdd_jump_arms", run_name="qdd_jump_arms"),
+    runner_cls=QddSkillArmsOnPolicyRunner,
 )
 register_mjlab_task(
     task_id=_QDD_GETUP_ARMS_TASK_ID,
