@@ -486,3 +486,88 @@ register_mjlab_task(
     rl_cfg=QddJumpRlCfg,
     runner_cls=QddSkillOnPolicyRunner,
 )
+
+
+# QDD biped WITH ARMS (tasks/qdd_biped_arms.py): walking, rough walking and the
+# jump with the arms held by their own PD (same 41-D obs / 10-D action as without
+# arms; the ONNX also carries "held_joints"), and the get-up with the arms in the
+# policy (48-D obs, 14-D action, policy_io_getup_arms.json).
+from .qdd_biped_arms import (
+    GETUP_ARMS_TASK_ID as _QDD_GETUP_ARMS_TASK_ID,
+    JUMP_ARMS_TASK_ID as _QDD_JUMP_ARMS_TASK_ID,
+    ROUGH_ARMS_TASK_ID as _QDD_ROUGH_ARMS_TASK_ID,
+    VELOCITY_ARMS_TASK_ID as _QDD_VELOCITY_ARMS_TASK_ID,
+    getup_arms_policy_io_onnx_metadata as _qdd_getup_arms_policy_io_onnx_metadata,
+    held_joints_onnx_metadata as _qdd_held_joints_onnx_metadata,
+    make_qdd_biped_getup_arms_env_cfg,
+    make_qdd_biped_jump_arms_env_cfg,
+    make_qdd_biped_rough_arms_env_cfg,
+    make_qdd_biped_velocity_arms_env_cfg,
+)
+
+
+def _attach_onnx_metadata(runner, path: str, metadata_fn, tag: str) -> None:
+    _, _, onnx_path = runner._get_export_paths(path)
+    try:
+        from mjlab.rl.exporter_utils import attach_metadata_to_onnx
+
+        if onnx_path.exists():
+            attach_metadata_to_onnx(str(onnx_path), metadata_fn())
+    except Exception as e:  # never kill training over metadata
+        print(f"[WARN] {tag} ONNX metadata failed: {e}")
+
+
+class QddBipedArmsHeldOnPolicyRunner(QddBipedOnPolicyRunner):
+    """Walking with arms held: the walking policy_io + held_joints."""
+
+    def save(self, path: str, infos=None):
+        super().save(path, infos)
+        _attach_onnx_metadata(self, path, _qdd_held_joints_onnx_metadata, "held_joints")
+
+
+class QddSkillArmsHeldOnPolicyRunner(QddSkillOnPolicyRunner):
+    """Jump with arms held: the skill metadata + held_joints."""
+
+    def save(self, path: str, infos=None):
+        super().save(path, infos)
+        _attach_onnx_metadata(self, path, _qdd_held_joints_onnx_metadata, "held_joints")
+
+
+class QddBipedGetupArmsOnPolicyRunner(MicroduckOnPolicyRunner):
+    """Attaches robot/qdd_biped/policy_io_getup_arms.json to every checkpoint ONNX."""
+
+    def save(self, path: str, infos=None):
+        super().save(path, infos)
+        _attach_onnx_metadata(self, path, _qdd_getup_arms_policy_io_onnx_metadata, "policy_io (getup arms)")
+
+
+register_mjlab_task(
+    task_id=_QDD_VELOCITY_ARMS_TASK_ID,
+    env_cfg=make_qdd_biped_velocity_arms_env_cfg(),
+    play_env_cfg=make_qdd_biped_velocity_arms_env_cfg(play=True),
+    rl_cfg=replace(QddBipedRlCfg, experiment_name="qdd_biped_arms", run_name="qdd_biped_arms"),
+    runner_cls=QddBipedArmsHeldOnPolicyRunner,
+)
+register_mjlab_task(
+    task_id=_QDD_ROUGH_ARMS_TASK_ID,
+    env_cfg=make_qdd_biped_rough_arms_env_cfg(),
+    play_env_cfg=make_qdd_biped_rough_arms_env_cfg(play=True),
+    rl_cfg=replace(
+        QddBipedRlCfg, experiment_name="qdd_biped_rough_arms", run_name="qdd_biped_rough_arms", max_iterations=3_000
+    ),
+    runner_cls=QddBipedArmsHeldOnPolicyRunner,
+)
+register_mjlab_task(
+    task_id=_QDD_JUMP_ARMS_TASK_ID,
+    env_cfg=make_qdd_biped_jump_arms_env_cfg(),
+    play_env_cfg=make_qdd_biped_jump_arms_env_cfg(play=True),
+    rl_cfg=replace(QddJumpRlCfg, experiment_name="qdd_jump_arms", run_name="qdd_jump_arms"),
+    runner_cls=QddSkillArmsHeldOnPolicyRunner,
+)
+register_mjlab_task(
+    task_id=_QDD_GETUP_ARMS_TASK_ID,
+    env_cfg=make_qdd_biped_getup_arms_env_cfg(),
+    play_env_cfg=make_qdd_biped_getup_arms_env_cfg(play=True),
+    rl_cfg=replace(QddBipedGetupRlCfg, experiment_name="qdd_biped_getup_arms", run_name="qdd_biped_getup_arms"),
+    runner_cls=QddBipedGetupArmsOnPolicyRunner,
+)

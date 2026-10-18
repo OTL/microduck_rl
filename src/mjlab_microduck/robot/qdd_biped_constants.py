@@ -176,12 +176,13 @@ TORSO_TOP_BOX = ((0.0157, 0.0, 0.15), (0.05, 0.08, 0.03))
 BODY_FRICTION = 0.6  # PA12 / TPU covers on a floor (randomised in the get-up env)
 
 
-def add_getup_collision_geoms(spec: mujoco.MjSpec) -> list[str]:
+def add_getup_collision_geoms(spec: mujoco.MjSpec, bodies=None) -> list[str]:
     """Add floor-only collision shapes for the motor housings and the rabbit top
-    (see above). Returns the names of the added geoms."""
+    (see above), on every body or only on ``bodies`` (names). Returns the names
+    of the added geoms."""
     added: list[str] = []
     for body in spec.bodies:
-        if body.name == "world":
+        if body.name == "world" or (bodies is not None and body.name not in bodies):
             continue
         motors = [
             g
@@ -291,4 +292,133 @@ def qdd_envelope_actuators(delay_max_lag: int = 2, v_bus: float = 22.0) -> tuple
             motor="3510",
             **d,
         ),
+    )
+
+
+# =============================================================================
+# Arms (2026-10-18, OTL: arms so the robot can get up with both feet together).
+# Design study: scripts/qdd_getup_search/ (gpu_cem.py, arms_replay.py); the
+# drawing OTL approved: 2-axis arm (shoulder pitch + elbow), 20 cm from the
+# shoulder axis to the hand tip, on the torso side walls. Motors GIM3510-8 on
+# both joints (output-side encoder on every joint, like the ankle; GIM4310-10
+# has none). Not in the robot repo's robot/model.py yet: values here are the
+# design-study values and move there with the CAD.
+#   - joints (after the legs in qpos / action order): l_shoulder_pitch, l_elbow,
+#     r_shoulder_pitch, r_elbow; pitch axes (y), so the mirror swaps l/r with no
+#     sign change. 0 = arm hanging straight down; shoulder - = forward / up.
+#   - collisions: upper arm and forearm capsules (*_collision: floor, falls and
+#     leg-arm self-collision like the legs), motor housings floor-only in the
+#     get-up model (visual cylinders in MOTOR_VISUAL_RGBA, add_getup_collision_geoms).
+# =============================================================================
+QDD_ARM_JOINT_NAMES = ("l_shoulder_pitch", "l_elbow", "r_shoulder_pitch", "r_elbow")
+QDD_ARMS_JOINT_NAMES = QDD_JOINT_NAMES + QDD_ARM_JOINT_NAMES
+QDD_LEG_JOINT_EXPR = (r"^(l|r)_(hip_yaw|hip_roll|hip_pitch|knee|ankle_pitch)$",)
+ARM_SHOULDER_POS = (0.0, 0.103, 0.112)  # torso frame (+y = left), outside the side wall
+ARM_LENGTH = 0.20  # shoulder axis -> hand tip
+ARM_UPPER = 0.10  # shoulder -> elbow
+ARM_LINK_Y = 0.045  # links run outside the shoulder motor
+ARM_LINK_RADIUS = 0.014
+ARM_LINK_MASS = 0.06  # PA12 tube, each link
+ARM_SHOULDER_RANGE = (-3.3, 2.2)  # rad; - forward
+ARM_ELBOW_RANGE = (0.0, 2.36)  # rad; + bends the forearm forward
+ARM_MOTOR = dict(mass=0.26, radius=0.023, half_len=0.0265, armature=1.0e-5 * 8**2)  # GIM3510-8
+ARM_PEAK = 6.28
+ARM_KP, ARM_KD = 30.0, 0.6
+
+
+def add_arms(spec: mujoco.MjSpec) -> mujoco.MjSpec:
+    """Add the two arms to a QDD biped spec (in place; returns it)."""
+    torso = spec.body(TORSO_BODY)
+    mm = ARM_MOTOR
+    for s, nm in ((1, "l"), (-1, "r")):
+        sx, sy, sz = ARM_SHOULDER_POS
+        arm = torso.add_body(name=f"{nm}_upper_arm", pos=[sx, s * sy, sz])
+        jopt = dict(type=mujoco.mjtJoint.mjJNT_HINGE, axis=[0, 1, 0], armature=mm["armature"], damping=0.05, frictionloss=0.05)
+        arm.add_joint(name=f"{nm}_shoulder_pitch", range=list(ARM_SHOULDER_RANGE), **jopt)
+        y = s * ARM_LINK_Y
+        fore = arm.add_body(name=f"{nm}_forearm", pos=[0, 0, -ARM_UPPER])
+        fore.add_joint(name=f"{nm}_elbow", range=list(ARM_ELBOW_RANGE), **jopt)
+        for body, length in ((arm, ARM_UPPER), (fore, ARM_LENGTH - ARM_UPPER)):
+            # motor at the joint, between the parent and the link (visual: get-up model makes it floor-only)
+            body.add_geom(
+                type=mujoco.mjtGeom.mjGEOM_CYLINDER,
+                fromto=[0, s * 0.0, 0, 0, s * 2 * mm["half_len"], 0],
+                size=[mm["radius"], 0, 0],
+                mass=mm["mass"],
+                contype=0,
+                conaffinity=0,
+                group=2,
+                rgba=list(MOTOR_VISUAL_RGBA),
+            )
+            link = f"{body.name}_collision"
+            body.add_geom(
+                name=link,
+                type=mujoco.mjtGeom.mjGEOM_CAPSULE,
+                fromto=[0, y, 0, 0, y, -length],
+                size=[ARM_LINK_RADIUS, 0, 0],
+                mass=ARM_LINK_MASS,
+                group=3,
+            )
+            body.add_geom(
+                type=mujoco.mjtGeom.mjGEOM_CAPSULE,
+                fromto=[0, y, 0, 0, y, -length],
+                size=[ARM_LINK_RADIUS, 0, 0],
+                mass=0.0,
+                contype=0,
+                conaffinity=0,
+                group=2,
+                rgba=[0.85, 0.85, 0.8, 1],
+            )
+    return spec
+
+
+def get_qdd_biped_arms_spec() -> mujoco.MjSpec:
+    return add_arms(get_qdd_biped_spec())
+
+
+QDD_ARM_BODIES = tuple(f"{s}_{b}" for s in "lr" for b in ("upper_arm", "forearm"))
+
+
+def get_qdd_biped_getup_arms_spec() -> mujoco.MjSpec:
+    return add_arms_getup(get_qdd_biped_getup_spec())
+
+
+def add_arms_getup(spec: mujoco.MjSpec) -> mujoco.MjSpec:
+    """add_arms on a spec that already has the get-up collision shapes: the arm
+    motor housings get theirs too."""
+    add_arms(spec)
+    add_getup_collision_geoms(spec, bodies=QDD_ARM_BODIES)
+    return spec
+
+
+# Get-up with arms: fallen-state library and demo (scripts/qdd_getup_states.py --arms,
+# scripts/qdd_getup_search/export_arms_demo.py).
+QDD_GETUP_ARMS_STATES_NPZ: Path = Path(os.path.dirname(__file__)) / "qdd_biped" / "getup_states_arms.npz"
+QDD_GETUP_ARMS_DEMO_NPZ: Path = Path(os.path.dirname(__file__)) / "qdd_biped" / "getup_demo_traj_arms.npz"
+QDD_GETUP_ARMS_POLICY_IO_JSON: Path = Path(os.path.dirname(__file__)) / "qdd_biped" / "policy_io_getup_arms.json"
+
+
+QDD_ACTUATOR_ARM = BuiltinPositionActuatorCfg(
+    target_names_expr=(r".*_shoulder_pitch", r".*_elbow"),
+    stiffness=ARM_KP,
+    damping=ARM_KD,
+    effort_limit=ARM_PEAK,
+    **_DELAY,
+)
+
+
+def arm_actuator_like(first) -> object:
+    """The arm actuator in the same style (builtin PD or torque-speed envelope) and
+    with the same delay as ``first``, an actuator cfg of the legs."""
+    from dataclasses import replace
+
+    from mjlab_microduck.actuator.qdd_motor import QddMotorActuatorCfg
+
+    names = (r".*_shoulder_pitch", r".*_elbow")
+    if isinstance(first, QddMotorActuatorCfg):
+        return replace(first, target_names_expr=names, stiffness=ARM_KP, damping=ARM_KD, effort_limit=ARM_PEAK, motor="3510")
+    return replace(
+        QDD_ACTUATOR_ARM,
+        delay_min_lag=getattr(first, "delay_min_lag", 0),
+        delay_max_lag=getattr(first, "delay_max_lag", 2),
     )

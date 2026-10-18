@@ -195,3 +195,18 @@ python3 bench_duck.py --task Mjlab-Velocity-Flat-QddBiped --envs 64 --iters 5
 どちらの場合も、先に `yatai/qdd-biped` を fork に push しておく必要がある。`pyproject.toml` と `uv.lock` は変えていないので、ブランチに切り替えても依存の入れ直しは起きない。
 
 本番の目安: `--envs 4096 --iters 1000`。カリキュラム（行動変化の罰、静止環境の割合）は 750 反復で最終値になるよう縮めてある。`max_iterations` の既定も 1000。
+
+## 腕つき（2026-10-18）
+
+腕で両足をそろえて起き上がれるように、肩と肘の 2 軸の腕（肩の軸から手先まで 20 cm、モータは両方 GIM3510-8、腕 1 本 0.64 kg、全体 6.61 → 7.89 kg）を付けたモデルと課題。形は探索（`scripts/qdd_getup_search/`）で決めた設計案で、ロボットのリポジトリの `robot/model.py` にはまだ入っていない（`robot/qdd_biped_constants.py` の `add_arms`）。
+
+| 課題 | 腕 | 観測 / 行動 |
+|---|---|---|
+| `Mjlab-Velocity-Flat-QddBipedArms` | 腕は PD で 0（下に垂らす）に保つ | 41 / 10（腕なしと同じ。ONNX に `held_joints`） |
+| `Mjlab-Velocity-Rough-QddBipedArms` | 同上 | 41 / 10 |
+| `Mjlab-Skill-Hop-QddBipedArms` | 同上 | 41 / 10 |
+| `Mjlab-Getup-QddBipedArms` | 方策が動かす | 48 / 14（`policy_io_getup_arms.json`） |
+
+- 関節の並びは脚 10 個のあと `l_shoulder_pitch, l_elbow, r_shoulder_pitch, r_elbow`。どれもピッチ軸なので、左右反転は入れ替えだけで符号は変えない。
+- 起き上がりの転倒姿勢は `scripts/qdd_getup_states.py --arms`（`getup_states_arms.npz`）、手本は探索で見つけた仰向けからの起き上がり（`scripts/qdd_getup_search/export_arms_demo.py` → `getup_demo_traj_arms.npz`）。うつ伏せの手本はない（腕なしの手本は腕があると立てない）ので、うつ伏せの橋渡しの開始姿勢も使わない。
+- 腕を下に垂らしたまま既定姿勢で立たせると、胴体が後ろに約 8.7° 傾く（腕なしは 4.5°）。方策が直す。

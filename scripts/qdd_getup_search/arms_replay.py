@@ -15,6 +15,25 @@ import numpy as np
 import torch
 
 
+def cpu_search(a) -> "G.Search":
+    """A CPU Search object (model, gains, key builder) for a saved result's args."""
+    S = G.Search.__new__(G.Search)
+    S.a, S.dev = a, "cpu"
+    S.arm = G.ArmCfg(length=a.arm_len, elbow=a.elbow, sh_range=(-3.3, a.sh_back))
+    S.m = G.build_model(S.arm)
+    S.nj = S.m.nq - 7
+    S.npk = G.n_per_key(a)
+    kp, kd, eff = G.leg_gains()
+    na = S.nj - 10
+    S.kp = torch.tensor(kp + [S.arm.kp] * na)
+    S.kd = torch.tensor(kd + [S.arm.kd] * na)
+    S.eff = torch.tensor(eff + [S.arm.effort] * na)
+    S.lo = torch.tensor(S.m.jnt_range[1:, 0], dtype=torch.float32)
+    S.hi = torch.tensor(S.m.jnt_range[1:, 1], dtype=torch.float32)
+    S.q0 = torch.tensor(np.r_[G.default_legs(), np.zeros(na)], dtype=torch.float32)
+    return S
+
+
 def rollout(m, S, x, q0_state, rec=False, speed_limit=True):
     keys, durs = S.keys(torch.tensor(x[None], dtype=torch.float32))
     keys, durs = keys[0].numpy(), durs[0].numpy()
@@ -64,20 +83,8 @@ def main():
     args = json.loads(f["args"].item())
     a = argparse.Namespace(**args)
     a.pop, a.ns = 1, 1
-    S = G.Search.__new__(G.Search)
-    S.a, S.dev = a, "cpu"
-    S.arm = G.ArmCfg(length=a.arm_len, elbow=a.elbow, sh_range=(-3.3, a.sh_back))
-    S.m = G.build_model(S.arm)
-    S.nj = S.m.nq - 7
-    S.npk = G.n_per_key(a)
-    kp, kd, eff = G.leg_gains()
+    S = cpu_search(a)
     na = S.nj - 10
-    S.kp = torch.tensor(kp + [S.arm.kp] * na)
-    S.kd = torch.tensor(kd + [S.arm.kd] * na)
-    S.eff = torch.tensor(eff + [S.arm.effort] * na)
-    S.lo = torch.tensor(S.m.jnt_range[1:, 0], dtype=torch.float32)
-    S.hi = torch.tensor(S.m.jnt_range[1:, 1], dtype=torch.float32)
-    S.q0 = torch.tensor(np.r_[G.default_legs(), np.zeros(na)], dtype=torch.float32)
     x = f[r.which]
     st = G.fall_starts(a.face, r.n, 1234)
     st = np.c_[st, np.zeros((len(st), na))]

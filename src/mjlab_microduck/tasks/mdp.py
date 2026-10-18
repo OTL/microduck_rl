@@ -8579,7 +8579,8 @@ class getup_demo_tracking:
         asset: Entity = env.scene[cfg.params.get("asset_cfg", _DEFAULT_ASSET_CFG).name]
         dd = np.load(cfg.params.get("demo_path", str(rc.QDD_GETUP_DEMO_NPZ)))
         Q, demo = dd["qpos"].astype(np.float64), dd["demo"]
-        names = list(rc.QDD_JOINT_NAMES)
+        # demo qpos joint order: its joint_names (arms demo), else the legs
+        names = [str(n) for n in dd["joint_names"]] if "joint_names" in dd.files else list(rc.QDD_JOINT_NAMES)
         order = [names.index(n) for n in asset.joint_names]
         w, x, y, z = Q[:, 3:7].T
         # torso gravity direction in the body frame: -(third row of R)
@@ -8587,7 +8588,7 @@ class getup_demo_tracking:
         feat = np.concatenate([Q[:, 7:][:, order], g], axis=1)
         f0, f1 = np.flatnonzero(demo == 0), np.flatnonzero(demo == 1)
         refs = [feat[f0], np.concatenate([feat[f1], feat[f0]])]
-        T = max(len(r) for r in refs)
+        T = max(max(len(r) for r in refs), 1)
         R = np.zeros((2, T, feat.shape[1]), np.float32)
         for i, r in enumerate(refs):
             R[i, : len(r)] = r
@@ -8618,7 +8619,8 @@ class getup_demo_tracking:
             demo_t = torch.tensor(demo, device=dev, dtype=torch.long)
             fr = term.demo_frame.clamp(min=0)
             d = demo_t[fr]
-            start = torch.tensor([int(f0[0]), int(f1[0])], device=dev)
+            # the arms demo has a supine get-up only (demo 1, ends standing; no demo 0)
+            start = torch.tensor([int(f0[0]) if len(f0) else 0, int(f1[0]) if len(f1) else 0], device=dev)
             rid = torch.where(p, d, rid)
             off = torch.where(p, fr - start[d.clamp(0, 1)], off)
         # getup9: the robust demos start in a prep pose that a real fall reaches

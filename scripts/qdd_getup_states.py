@@ -59,10 +59,21 @@ KIND_P = (0.3, 0.25, 0.2, 0.25)  # simulated kinds; "path" rows are added on top
 SIM_KINDS = KINDS[:4]
 FALL_KINDS = ("push", "stride", "drop")
 DEMO_DT = 0.02  # s between demo frames (scripts/qdd_getup_search/export_traj.py)
+# --arms: the model with arms (robot/qdd_biped_constants.py add_arms); joints =
+# legs then l/r shoulder pitch + elbow. Set in main() before the worker pool forks.
+ARMS = False
+
+
+def joint_names() -> tuple:
+    return rc.QDD_ARMS_JOINT_NAMES if ARMS else rc.QDD_JOINT_NAMES
+
+
+def nj() -> int:
+    return len(joint_names())
 
 
 def build_model() -> mujoco.MjModel:
-    spec = rc.get_qdd_biped_getup_spec()
+    spec = rc.get_qdd_biped_getup_arms_spec() if ARMS else rc.get_qdd_biped_getup_spec()
     for g in spec.geoms:
         if not g.name.endswith("_collision"):
             g.contype = g.conaffinity = 0
@@ -84,9 +95,11 @@ def build_model() -> mujoco.MjModel:
 
 def _gains(m: mujoco.MjModel):
     kp, kd, eff = [], [], []
-    for n in rc.QDD_JOINT_NAMES:
+    for n in joint_names():
         a = (
-            rc.QDD_ACTUATOR_HIP_YAW_ROLL
+            rc.QDD_ACTUATOR_ARM
+            if n.endswith(("shoulder_pitch", "elbow"))
+            else rc.QDD_ACTUATOR_HIP_YAW_ROLL
             if n.endswith(("hip_yaw", "hip_roll"))
             else rc.QDD_ACTUATOR_HIP_PITCH_KNEE
             if n.endswith(("hip_pitch", "knee"))
@@ -101,7 +114,7 @@ def _gains(m: mujoco.MjModel):
 def _default_q() -> np.ndarray:
     k = math.radians(rc.CROUCH_KNEE_DEG)
     one = [0.0, 0.0, -k / 2, k, -k / 2]
-    return np.array(one * 2)
+    return np.array(one * 2 + [0.0] * (nj() - 10))
 
 
 def _quat_from_axis_angle(axis, ang):
@@ -155,7 +168,8 @@ def simulate(seed: int, kind: str, m: mujoco.MjModel):
         damping, target = True, q.copy()
     elif kind == "crouch":
         knee = math.radians(rng.uniform(60, 120))
-        target = np.zeros(10)
+        target = np.zeros(nj())
+        target[10:] = rng.uniform(-0.3, 0.3, nj() - 10)  # arms (if any) near hanging
         for s in (0, 5):
             hp = -knee / 2 + rng.uniform(-0.5, 0.3)
             target[s : s + 5] = [rng.uniform(-0.1, 0.1), rng.uniform(-0.1, 0.1), hp, knee, -knee / 2 + rng.uniform(-0.3, 0.3)]
@@ -171,7 +185,7 @@ def simulate(seed: int, kind: str, m: mujoco.MjModel):
     else:
         target = q0.copy()
         if kind == "stride":
-            target = q0 + rng.uniform(-0.35, 0.35, 10)
+            target = q0 + rng.uniform(-0.35, 0.35, nj())
             target = np.clip(target, lo + 0.02, hi - 0.02)
             for s in (0, 5):
                 target[s + 3] = float(np.clip(target[s + 3], 0.1, rc.knee_max(target[s + 2]) - 0.02))
@@ -231,7 +245,20 @@ def simulate(seed: int, kind: str, m: mujoco.MjModel):
     if not _knee_ok(q, 0.1):
         simulate.reason = "knee_max"
         return None
-    return float(d.qpos[2]), d.qpos[3:7].copy(), q, _tilt_deg(d), np.zeros(6), np.zeros(10)
+    return float(d.qpos[2]), d.qpos[3:7].copy(), q, _tilt_deg(d), np.zeros(6), np.zeros(nj())
+
+
+def _swap_lr(j: np.ndarray) -> np.ndarray:
+    """Joint vector mirrored: legs swapped with hip yaw / roll negated, arms
+    (pitch axes) swapped."""
+    l, r = j[:5].copy(), j[5:10].copy()
+    for leg in (l, r):
+        leg[0] *= -1  # hip yaw
+        leg[1] *= -1  # hip roll
+    out = np.r_[r, l]
+    if len(j) > 10:
+        out = np.r_[out, j[12:14], j[10:12]]
+    return out
 
 
 def _mirror(qpos: np.ndarray, qvel_world: np.ndarray):
@@ -240,22 +267,12 @@ def _mirror(qpos: np.ndarray, qvel_world: np.ndarray):
     q[1] *= -1
     w, x, y, z = q[3:7]
     q[3:7] = [w, -x, y, -z]
-    j = q[7:].copy()
-    l, r = j[:5].copy(), j[5:].copy()
-    for leg in (l, r):
-        leg[0] *= -1  # hip yaw
-        leg[1] *= -1  # hip roll
-    q[7:] = np.r_[r, l]
+    q[7:] = _swap_lr(q[7:])
     v = qvel_world.copy()
     v[1] *= -1  # linear y
     v[3] *= -1  # angular x
     v[5] *= -1  # angular z
-    jv = v[6:].copy()
-    lv, rv = jv[:5].copy(), jv[5:].copy()
-    for leg in (lv, rv):
-        leg[0] *= -1
-        leg[1] *= -1
-    v[6:] = np.r_[rv, lv]
+    v[6:] = _swap_lr(v[6:])
     return q, v
 
 
@@ -267,7 +284,8 @@ def path_remain_s(demo: np.ndarray, dt: float = DEMO_DT) -> np.ndarray:
     n0 = int(np.sum(demo == 0))
     for k in np.unique(demo):
         idx = np.flatnonzero(demo == k)
-        out[idx] = (len(idx) - 1 - np.arange(len(idx))) * dt + (0 if k == 0 else (n0 - 1) * dt)
+        # the arms demo is a supine get-up alone (demo 1, no demo 0): ends standing
+        out[idx] = (len(idx) - 1 - np.arange(len(idx))) * dt + (0 if k == 0 else max(n0 - 1, 0) * dt)
     return out
 
 
@@ -294,7 +312,7 @@ def sample_path_states(path: Path, n: int, seed: int, m: mujoco.MjModel):
         vw[3:6] = R @ v[3:6]  # free-joint angular velocity: body -> world frame
         if rng.random() < 0.5:
             q, vw = _mirror(q, vw)
-        q[7:] = np.clip(q[7:] + rng.normal(0, 0.03, 10), lo, hi)
+        q[7:] = np.clip(q[7:] + rng.normal(0, 0.03, nj()), lo, hi)
         for s in (0, 5):
             q[7 + s + 3] = min(q[7 + s + 3], rc.knee_max(q[7 + s + 2]))
         vw *= rng.uniform(0.8, 1.2)
@@ -378,7 +396,7 @@ def bridge_state(anchor_q: np.ndarray, fall_q: np.ndarray, alpha: float, m: mujo
     q = d.qpos[7:].copy()
     if not _knee_ok(q, 0.1):
         return None
-    return float(d.qpos[2]), d.qpos[3:7].copy(), q, _tilt_deg(d), np.zeros(6), np.zeros(10), float(alpha)
+    return float(d.qpos[2]), d.qpos[3:7].copy(), q, _tilt_deg(d), np.zeros(6), np.zeros(nj()), float(alpha)
 
 
 def sample_bridge_states(demo_path: Path, falls: list, n: int, seed: int, m: mujoco.MjModel):
@@ -388,12 +406,15 @@ def sample_bridge_states(demo_path: Path, falls: list, n: int, seed: int, m: muj
     rng = np.random.default_rng(seed)
     dd = np.load(demo_path)
     Q, demo = dd["qpos"].astype(np.float64), dd["demo"]
-    anchors = {"prone": Q[np.flatnonzero(demo == 0)[0]], "supine": Q[np.flatnonzero(demo == 1)[0]]}
+    # demo 0 starts prone, demo 1 supine (the arms demo has demo 1 only)
+    anchors = {face: Q[np.flatnonzero(demo == k)[0]] for k, face in ((0, "prone"), (1, "supine")) if (demo == k).any()}
     by_face = {"prone": [], "supine": []}
     for z, quat, q in falls:
         by_face[face_of(quat)].append(np.r_[0.0, 0.0, z, quat, q])
     rows = []
     for face, pool in by_face.items():
+        if face not in anchors:
+            continue
         got, tries = 0, 0
         while got < n and tries < 3 * n and pool:
             tries += 1
@@ -413,17 +434,22 @@ def _work(args):
 
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--arms", action="store_true", help="the model with arms (default out / demo: the _arms files)")
     ap.add_argument("--n", type=int, default=3000)
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--out", default=str(rc.QDD_GETUP_STATES_NPZ))
+    ap.add_argument("--out", default=None)
     ap.add_argument("--workers", type=int, default=0)
     ap.add_argument("--n-path", type=int, default=1500, help="states along the demo get-ups")
-    ap.add_argument("--demo", default=str(rc.QDD_GETUP_DEMO_NPZ))
+    ap.add_argument("--demo", default=None)
     ap.add_argument("--n-bridge", type=int, default=1500, help="bridge states per face (prone / supine)")
     ap.add_argument(
         "--reuse-sim", default="", help="take the simulated (non-path) rows from this library instead of simulating"
     )
     a = ap.parse_args()
+    global ARMS
+    ARMS = a.arms
+    a.out = a.out or str(rc.QDD_GETUP_ARMS_STATES_NPZ if ARMS else rc.QDD_GETUP_STATES_NPZ)
+    a.demo = a.demo or str(rc.QDD_GETUP_ARMS_DEMO_NPZ if ARMS else rc.QDD_GETUP_DEMO_NPZ)
     if a.reuse_sim:
         old = np.load(a.reuse_sim)
         old_kinds = [str(k) for k in old["kinds"]]
@@ -460,7 +486,7 @@ def main():
     np.savez_compressed(
         a.out, root_z=z, root_quat=quat, joint_pos=q, tilt_deg=tilt, kind=kind,
         root_vel=root_vel, joint_vel=joint_vel, remain_s=remain_s, alpha=alpha, demo_frame=demo_frame,
-        kinds=np.array(KINDS), joint_names=np.array(rc.QDD_JOINT_NAMES),
+        kinds=np.array(KINDS), joint_names=np.array(joint_names()),
     )
     print(f"{len(rows)} states ({len(res) - sum(r is None for _, r in res)} usable of {len(res)}) -> {a.out}")
     for i, k in enumerate(KINDS):
