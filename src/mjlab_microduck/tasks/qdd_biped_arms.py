@@ -66,6 +66,19 @@ ARM_POSE_STD = 0.5  # rad, the jump's arm_pose term
 ARM_POSE_WEIGHT = 0.2  # the jump's arm_pose term
 IMPLICIT_KD_MIN_DT = 0.004  # s: physics steps this long put the legs' kd in the joints
 
+# Arms while walking / jumping (OTL 2026-10-18: elbows bent forward, a reference):
+# default pose (action offset, standing) and the swing reference
+# (mdp.qdd_arm_swing_tracking: each shoulder against its own leg, amplitude ~ the
+# commanded forward speed).
+ARM_WALK_SHOULDER0 = -0.1  # rad, slightly forward (shoulder - = forward)
+ARM_WALK_ELBOW0 = 1.0  # rad (57 deg), forearm bent forward
+ARM_SWING_AMP = 0.35  # rad (20 deg) each way at ARM_SWING_V_FULL
+ARM_SWING_V_FULL = 0.5  # m/s, the top of the forward command range
+ARM_SWING_ELBOW_AMP = 0.2  # rad more elbow bend while the arm is forward
+ARM_SWING_STD = 0.25  # rad
+ARM_SWING_WEIGHT = 1.0
+ARM_WALK_HOME = {r".*_shoulder_pitch": ARM_WALK_SHOULDER0, r".*_elbow": ARM_WALK_ELBOW0}
+
 
 def _arms_spec(inner, getup: bool, collide: bool = True, implicit_kd: bool = False, leg_kd: tuple = ()):
     spec = inner()
@@ -180,16 +193,52 @@ def add_arms_to_env_cfg(
     return cfg
 
 
+def _set_arm_home(cfg: ManagerBasedRlEnvCfg) -> None:
+    """Arms' default pose (bent elbows): the action offset and the reset pose."""
+    robot = cfg.scene.entities["robot"]
+    robot.init_state = replace(robot.init_state, joint_pos={**dict(robot.init_state.joint_pos), **ARM_WALK_HOME})
+
+
+def _add_arm_swing(cfg: ManagerBasedRlEnvCfg) -> None:
+    """Walking: the arm swing reference replaces the arms' share of the pose term."""
+    from mjlab.managers.reward_manager import RewardTermCfg
+
+    from mjlab_microduck.tasks import mdp as microduck_mdp
+
+    pose = cfg.rewards["pose"]
+    for key in ("std_standing", "std_walking", "std_running"):
+        if isinstance(pose.params.get(key), dict):
+            pose.params[key] = {**pose.params[key], r".*_shoulder_pitch": 10.0, r".*_elbow": 10.0}
+    cfg.rewards["arm_swing"] = RewardTermCfg(
+        func=microduck_mdp.qdd_arm_swing_tracking,
+        weight=ARM_SWING_WEIGHT,
+        params={
+            "std": ARM_SWING_STD,
+            "shoulder0": ARM_WALK_SHOULDER0,
+            "elbow0": ARM_WALK_ELBOW0,
+            "amp_max": ARM_SWING_AMP,
+            "v_full": ARM_SWING_V_FULL,
+            "elbow_amp": ARM_SWING_ELBOW_AMP,
+        },
+    )
+
+
 def make_qdd_biped_velocity_arms_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     from mjlab_microduck.tasks.qdd_biped_velocity_env_cfg import make_qdd_biped_velocity_env_cfg
 
-    return add_arms_to_env_cfg(make_qdd_biped_velocity_env_cfg(play=play), policy_arms=True)
+    cfg = add_arms_to_env_cfg(make_qdd_biped_velocity_env_cfg(play=play), policy_arms=True)
+    _set_arm_home(cfg)
+    _add_arm_swing(cfg)
+    return cfg
 
 
 def make_qdd_biped_rough_arms_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     from mjlab_microduck.tasks.qdd_biped_rough_env_cfg import make_qdd_biped_rough_env_cfg
 
-    return add_arms_to_env_cfg(make_qdd_biped_rough_env_cfg(play=play), policy_arms=True)
+    cfg = add_arms_to_env_cfg(make_qdd_biped_rough_env_cfg(play=play), policy_arms=True)
+    _set_arm_home(cfg)
+    _add_arm_swing(cfg)
+    return cfg
 
 
 def make_qdd_biped_jump_arms_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
@@ -201,6 +250,7 @@ def make_qdd_biped_jump_arms_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg
 
     # the jump already has envelope actuators (2.5 ms physics)
     cfg = add_arms_to_env_cfg(make_qdd_biped_skill_env_cfg(JUMP_SPEC, play=play), policy_arms=True)
+    _set_arm_home(cfg)  # the jump's arm reference (the default pose) has bent elbows too
     cfg.rewards["arm_pose"] = RewardTermCfg(
         func=microduck_mdp.pose_target_match,
         weight=ARM_POSE_WEIGHT,
@@ -238,7 +288,7 @@ ENVELOPE_NOTE = (
 )
 
 
-def extend_policy_io_with_arms(io: dict, task: str) -> dict:
+def extend_policy_io_with_arms(io: dict, task: str, arm_default: list | None = None) -> dict:
     """A leg-only policy_io (10 joints) with the 4 arm joints appended: action,
     actuators (kp / kd / effort / limits) and every per-joint observation term
     (joint_pos, joint_vel, actions); the term offsets and the ONNX shapes follow."""
@@ -249,7 +299,9 @@ def extend_policy_io_with_arms(io: dict, task: str) -> dict:
     act = io["action"]
     act["dim"] = n
     act["joint_order"] = names
-    act["default_joint_pos"] = list(act["default_joint_pos"]) + [0.0] * na
+    if arm_default is None:
+        arm_default = [0.0] * na
+    act["default_joint_pos"] = list(act["default_joint_pos"]) + [float(x) for x in arm_default]
     if isinstance(act.get("scale"), list):
         act["scale"] = list(act["scale"]) + [act["scale"][-1]] * na
     acts = io["actuators"]
@@ -270,13 +322,17 @@ def extend_policy_io_with_arms(io: dict, task: str) -> dict:
     io["onnx"]["input"]["shape"] = [1, start]
     ref = io.get("skill", {}).get("reference")
     if isinstance(ref, dict):
-        ref["arms_note"] = "the table has the legs only: the arms' reference is 0 (hanging), dq = tau_ff = 0"
+        ref["arms_note"] = "the table has the legs only: the arms' reference is their default pose (elbows bent), dq = tau_ff = 0"
     io["arms"] = {
         "note": "arms (robot/qdd_biped_constants.py add_arms, CAD v2): not in the robot repo's model yet",
         "motor": "GIM3510-8",
         "length_m": rc.ARM_LENGTH,
     }
     return io
+
+
+def _arm_walk_default() -> list[float]:
+    return [ARM_WALK_SHOULDER0 if n.endswith("shoulder_pitch") else ARM_WALK_ELBOW0 for n in rc.QDD_ARM_JOINT_NAMES]
 
 
 def build_getup_arms_policy_io() -> dict:
@@ -288,7 +344,7 @@ def build_getup_arms_policy_io() -> dict:
 def build_walking_arms_policy_io(task: str = VELOCITY_ARMS_TASK_ID) -> dict:
     from mjlab_microduck.tasks.qdd_biped_velocity_env_cfg import build_policy_io
 
-    return extend_policy_io_with_arms(build_policy_io(), task)
+    return extend_policy_io_with_arms(build_policy_io(), task, _arm_walk_default())
 
 
 def build_jump_arms_policy_io(spec: dict | None = None) -> dict:
@@ -297,7 +353,8 @@ def build_jump_arms_policy_io(spec: dict | None = None) -> dict:
 
     if spec is None:
         spec = qdd_skill.load_spec(JUMP_SPEC)
-    return extend_policy_io_with_arms(build_skill_policy_io(spec), JUMP_ARMS_TASK_ID)
+    io = extend_policy_io_with_arms(build_skill_policy_io(spec), JUMP_ARMS_TASK_ID, _arm_walk_default())
+    return io
 
 
 def arms_policy_io_onnx_metadata(task: str, spec: dict | None = None) -> dict[str, str]:

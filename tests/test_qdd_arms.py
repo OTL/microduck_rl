@@ -68,9 +68,10 @@ def test_arms_variants_have_the_arms_in_the_policy(factory):
     # motor housings collide with the robot too
     motors = [m.geom(i) for i in range(m.ngeom) if "_motor" in m.geom(i).name and m.geom(i).name.endswith("_collision")]
     assert motors and all(g.contype[0] & 1 and g.conaffinity[0] & 1 for g in motors)
+    # elbows bent forward by default (OTL 2026-10-18)
+    assert dict(robot.init_state.joint_pos)[r".*_elbow"] == pytest.approx(A.ARM_WALK_ELBOW0) and A.ARM_WALK_ELBOW0 > 0.5
     if "pose" in cfg.rewards:
-        std = cfg.rewards["pose"].params["std_walking"]
-        assert std[r".*_shoulder_pitch"] > 0 and std[r".*_elbow"] > 0
+        assert cfg.rewards["arm_swing"].weight > 0  # walking: the swing reference
     else:
         assert cfg.rewards["arm_pose"].weight > 0
 
@@ -166,3 +167,34 @@ def test_no_self_contact_when_standing():
     mujoco.mj_forward(m, d)
     touching = [(m.geom(c.geom1).name, m.geom(c.geom2).name) for c in d.contact[: d.ncon] if c.dist < 0.0]
     assert touching == []
+
+
+def test_arm_swing_target_against_the_legs():
+    """Left arm furthest back (shoulder +) when the left foot lands (phi = swing
+    fraction), right arm forward; standing / no command: the default pose."""
+    import types
+
+    import torch
+
+    from mjlab_microduck.tasks import mdp as M
+    from mjlab_microduck.tasks import qdd_biped_arms as A
+
+    gait = M.GaitClockCommand.__new__(M.GaitClockCommand)
+    gait.cfg = types.SimpleNamespace(swing_fraction=0.4)
+    gait.phase = torch.tensor([[0.4], [0.9], [0.4]])
+    gait.active = torch.tensor([True, True, False])
+    twist = torch.tensor([[0.5, 0, 0], [0.5, 0, 0], [0.0, 0, 0]])
+    env = types.SimpleNamespace(
+        command_manager=types.SimpleNamespace(get_term=lambda n: gait, get_command=lambda n: twist)
+    )
+    orig = M._qdd_gait
+    M._qdd_gait = lambda e, n: gait
+    try:
+        t = M.qdd_arm_swing_target(env, A.ARM_WALK_SHOULDER0, A.ARM_WALK_ELBOW0, A.ARM_SWING_AMP, 0.5, 0.2)
+    finally:
+        M._qdd_gait = orig
+    s0 = A.ARM_WALK_SHOULDER0
+    assert t[0, 0] == pytest.approx(s0 + A.ARM_SWING_AMP) and t[0, 2] == pytest.approx(s0 - A.ARM_SWING_AMP)
+    assert t[1, 0] == pytest.approx(s0 - A.ARM_SWING_AMP)
+    assert t[0, 3] > t[0, 1]  # the forward (right) arm bends its elbow more
+    assert torch.allclose(t[2], torch.tensor([s0, A.ARM_WALK_ELBOW0, s0, A.ARM_WALK_ELBOW0]))

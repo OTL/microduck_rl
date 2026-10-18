@@ -9611,3 +9611,62 @@ def sole_lowest_z(asset: Entity, site_ids, half_length: float, half_width: float
     r21 = 2.0 * (y * zq + w * x)  # world z of the site y axis
     low = pos[..., 2] - torch.abs(r20) * half_length - torch.abs(r21) * half_width
     return low.min(dim=1).values
+
+
+# ---------------------------------------------------------------------------
+# QDD biped with arms: arm swing reference while walking (tasks/qdd_biped_arms.py)
+# ---------------------------------------------------------------------------
+# OTL 2026-10-18: "歩行の腕の動かし方が不自然。肘を前方に曲げたほうがいい。何か
+# リファレンスを与えたほうがよい". Reference from the gait clock (unfarmable: it does
+# not follow what the legs actually do): elbows bent forward, each shoulder swings
+# against its own leg (the left arm is furthest back when the left foot lands,
+# phi = swing_fraction), amplitude ~ the commanded forward speed (signed: walking
+# backwards reverses the swing), at rest the default pose.
+
+
+def qdd_arm_swing_target(
+    env: ManagerBasedRlEnv,
+    shoulder0: float,
+    elbow0: float,
+    amp_max: float,
+    v_full: float,
+    elbow_amp: float = 0.0,
+    command_name: str = "twist",
+    gait_name: str = "gait",
+) -> torch.Tensor:
+    """[B, 4] reference (l_shoulder_pitch, l_elbow, r_shoulder_pitch, r_elbow) [rad].
+    Shoulder + = back. elbow_amp bends the elbow more while that arm is forward."""
+    gait = _qdd_gait(env, gait_name)
+    twist = env.command_manager.get_command(command_name)
+    sf = gait.cfg.swing_fraction
+    amp = amp_max * torch.clamp(twist[:, 0] / v_full, -1.0, 1.0) * gait.active.float()
+    c = torch.cos(2.0 * math.pi * (gait.phase[:, 0] - sf))  # +1 when the left foot lands
+    sh_l = shoulder0 + amp * c
+    sh_r = shoulder0 - amp * c
+    k = elbow_amp / max(amp_max, 1e-6)
+    el_l = elbow0 + k * torch.clamp(-(sh_l - shoulder0), min=0.0)
+    el_r = elbow0 + k * torch.clamp(-(sh_r - shoulder0), min=0.0)
+    return torch.stack((sh_l, el_l, sh_r, el_r), dim=1)
+
+
+def qdd_arm_swing_tracking(
+    env: ManagerBasedRlEnv,
+    std: float,
+    shoulder0: float,
+    elbow0: float,
+    amp_max: float,
+    v_full: float,
+    elbow_amp: float = 0.0,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    joint_names: tuple = ("l_shoulder_pitch", "l_elbow", "r_shoulder_pitch", "r_elbow"),
+    command_name: str = "twist",
+    gait_name: str = "gait",
+) -> torch.Tensor:
+    """REWARD in [0, 1]: exp(-mean((q_arm - target)^2) / std^2), target qdd_arm_swing_target."""
+    asset = env.scene[asset_cfg.name]
+    cache = env.__dict__.setdefault("_qdd_arm_ids", {})
+    if id(asset) not in cache:
+        cache[id(asset)] = [asset.joint_names.index(n) for n in joint_names]
+    q = asset.data.joint_pos[:, cache[id(asset)]]
+    tgt = qdd_arm_swing_target(env, shoulder0, elbow0, amp_max, v_full, elbow_amp, command_name, gait_name)
+    return torch.exp(-torch.mean(torch.square(q - tgt), dim=1) / std**2)
