@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "name": "bow",
+  "description": "お辞儀: 立った姿勢から上体を約25度前に倒し、少し止めてから立ち姿勢に戻る。膝と足首を少し曲げて腰を後ろに残す。",
+  "duration_s": 3.0,
+  "settle_s": 1.0,
+  "interpolation": "minjerk",
+  "support": "both_feet",
+  "keyframes": [
+    {"t": 0.0, "note": "standing"},
+    {
+      "t": 1.2,
+      "joints_deg": {"hip_pitch": -55.0, "knee": 60.0, "ankle_pitch": -30.0},
+      "torso": {"pitch_deg": 25.0},
+      "note": "bowed"
+    },
+    {
+      "t": 1.9,
+      "joints_deg": {"hip_pitch": -55.0, "knee": 60.0, "ankle_pitch": -30.0},
+      "torso": {"pitch_deg": 25.0},
+      "note": "hold"
+    },
+    {"t": 3.0, "note": "standing again"}
+  ],
+  "reward_weights": {
+    "joint_tracking": 3.0,
+    "torso_orientation": 2.0
+  }
+}

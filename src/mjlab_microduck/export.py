@@ -274,6 +274,12 @@ def run_export(task_id: str, cfg: ExportConfig) -> ExportResult:
         from mjlab_microduck.tasks.qdd_biped_getup_env_cfg import getup_policy_io_onnx_metadata
 
         metadata.update(getup_policy_io_onnx_metadata())
+    elif task_id.startswith("Mjlab-Skill-"):
+        # Skill policy: its own policy_io (skill clock, zero command) + the skill spec.
+        from mjlab_microduck.tasks.qdd_biped_skill_env_cfg import skill_onnx_metadata
+
+        skill = runner.env.unwrapped.command_manager.get_term("skill")
+        metadata.update(skill_onnx_metadata(skill.spec))
     attach_metadata_to_onnx(onnx_path, metadata)
 
     print(f"Written {onnx_path}")

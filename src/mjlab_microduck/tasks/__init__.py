@@ -363,3 +363,126 @@ register_mjlab_task(
     rl_cfg=QddBipedGetupRlCfg,
     runner_cls=QddBipedGetupOnPolicyRunner,
 )
+
+
+# QDD biped skills (keyframe tracking from a JSON spec, tasks/qdd_skill.py). The
+# skill is chosen by $QDD_SKILL_SPEC (path or name in robot/qdd_biped/skills/,
+# default bow) when this package is imported. Same 41-D obs / 10-D action as the
+# walking policy; the ONNX carries the skill's policy_io + spec.
+from .qdd_biped_skill_env_cfg import (
+    TASK_ID as _QDD_SKILL_TASK_ID,
+    JUMP_SPEC as _QDD_JUMP_SPEC,
+    JUMP_TASK_ID as _QDD_JUMP_TASK_ID,
+    QddJumpRlCfg,
+    QddSkillRlCfg,
+    make_qdd_biped_skill_env_cfg,
+    skill_onnx_metadata as _qdd_skill_onnx_metadata,
+    warm_start_onnx_path as _qdd_skill_warm_start_onnx,
+)
+
+
+def init_actor_from_onnx(actor, onnx_path, normalizer_count: int = 100_000) -> list[str]:
+    """Copy an exported actor (obs normaliser + MLP, mjlab/rsl_rl ONNX naming) into
+    an rsl_rl MLPModel with the same layout. Returns the loaded tensor names."""
+    import numpy as np
+    import onnx
+    import torch
+    from onnx import numpy_helper
+
+    m = onnx.load(str(onnx_path))
+    init = {i.name: numpy_helper.to_array(i) for i in m.graph.initializer}
+    state = actor.state_dict()
+    loaded = []
+    with torch.no_grad():
+        for name, value in init.items():
+            if name.startswith("mlp.") and name in state:
+                if tuple(state[name].shape) != value.shape:
+                    raise ValueError(f"{name}: ONNX {value.shape} vs actor {tuple(state[name].shape)}")
+                state[name].copy_(torch.from_numpy(np.array(value)))
+                loaded.append(name)
+        norm = getattr(actor, "obs_normalizer", None)
+        mean = init.get("obs_normalizer._mean")
+        if norm is not None and mean is not None and hasattr(norm, "_mean"):
+            # (x - mean) / (std + eps): the Div constant is std + eps
+            div = next(
+                (init[n.input[1]] for n in m.graph.node if n.op_type == "Div" and n.input[1] in init),
+                None,
+            )
+            if div is None:
+                raise ValueError("ONNX has a normaliser mean but no Div constant")
+            std = torch.from_numpy(np.array(div)).to(norm._std) - norm.eps
+            norm._mean.copy_(torch.from_numpy(np.array(mean)).to(norm._mean))
+            norm._std.copy_(std)
+            norm._var.copy_(std.square())
+            norm.count.fill_(normalizer_count)
+            loaded.append("obs_normalizer")
+    expected = {k for k in state if k.startswith("mlp.")}
+    if not expected.issubset(loaded):
+        raise ValueError(f"ONNX does not cover the actor MLP: missing {sorted(expected - set(loaded))}")
+    return loaded
+
+
+class QddSkillOnPolicyRunner(MicroduckOnPolicyRunner):
+    """Skill runner: warm-starts the actor from the walking ONNX (if present, see
+    qdd_biped_skill_env_cfg.WARM_START_ONNX_ENV) and embeds the skill's policy_io
+    + spec in every exported ONNX. A later ``load()`` (resume / play / export)
+    overrides the warm start as usual."""
+
+    def __init__(self, env, train_cfg: dict, log_dir=None, device="cpu", **kwargs):
+        super().__init__(env, train_cfg, log_dir, device, **kwargs)
+        path = _qdd_skill_warm_start_onnx()
+        try:
+            feedforward = env.unwrapped.command_manager.get_term("skill").spec.get("_table") is not None
+        except Exception:
+            feedforward = False
+        if feedforward:
+            # residual policy around a feed-forward table: from scratch, output ~ 0 (= the table alone)
+            import torch
+
+            from .qdd_biped_skill_env_cfg import REF_OUTPUT_INIT_GAIN
+
+            last = [m for m in self.alg.actor.modules() if isinstance(m, torch.nn.Linear)][-1]
+            with torch.no_grad():
+                last.weight.mul_(REF_OUTPUT_INIT_GAIN)
+                last.bias.zero_()
+            print(f"[skill] feed-forward skill: actor from scratch, output layer x {REF_OUTPUT_INIT_GAIN}")
+            path = None
+        elif path is not None:
+            try:
+                loaded = init_actor_from_onnx(self.alg.actor, path)
+                print(f"[skill] warm start: actor initialised from {path} ({len(loaded)} tensors)")
+            except Exception as e:  # a mismatch must not silently train garbage
+                raise RuntimeError(f"[skill] warm start from {path} failed: {e}") from e
+        elif not feedforward:
+            print("[skill] no warm start (training the actor from scratch)")
+
+    def save(self, path: str, infos=None):
+        super().save(path, infos)
+        _, _, onnx_path = self._get_export_paths(path)
+        try:
+            from mjlab.rl.exporter_utils import attach_metadata_to_onnx
+
+            if onnx_path.exists():
+                cmd = self.env.unwrapped.command_manager.get_term("skill")
+                attach_metadata_to_onnx(str(onnx_path), _qdd_skill_onnx_metadata(cmd.spec))
+        except Exception as e:  # never kill training over metadata
+            print(f"[WARN] skill ONNX metadata failed: {e}")
+
+
+register_mjlab_task(
+    task_id=_QDD_SKILL_TASK_ID,
+    env_cfg=make_qdd_biped_skill_env_cfg(),
+    play_env_cfg=make_qdd_biped_skill_env_cfg(play=True),
+    rl_cfg=QddSkillRlCfg,
+    runner_cls=QddSkillOnPolicyRunner,
+)
+
+# Jump skill (spec schema 2 with a flight phase): its own task id so yatai trains it
+# without $QDD_SKILL_SPEC (skills/hop.json).
+register_mjlab_task(
+    task_id=_QDD_JUMP_TASK_ID,
+    env_cfg=make_qdd_biped_skill_env_cfg(_QDD_JUMP_SPEC),
+    play_env_cfg=make_qdd_biped_skill_env_cfg(_QDD_JUMP_SPEC, play=True),
+    rl_cfg=QddJumpRlCfg,
+    runner_cls=QddSkillOnPolicyRunner,
+)

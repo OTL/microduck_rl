@@ -1,0 +1,103 @@
+{
+  "schema_version": 2,
+  "name": "hop",
+  "description": "両足ジャンプ（足を高く）: 膝105度・胴体30度前傾でしゃがみ、重心が足の上・角運動量0のまま押し出して重心を約4.0cm上げる（離陸0.89m/s）。空中で膝を80度まで畳み、足裏を約8cm浮かせ、着地の前に脚を伸ばしてつま先を20度下げて着地し、膝90度まで沈んで受けて立ち姿勢に戻る。関節の目標・速さ・トルクのフィードフォワードは reference_table（robot repo の analysis/hop_reference.py）。方策はその補正だけを学ぶ。",
+  "duration_s": 2.6,
+  "settle_s": 0.8,
+  "interpolation": "pchip",
+  "policy_rate_hz": 100,
+  "support": "both_feet",
+  "reference_table": "hop_ref.json",
+  "contact": [
+    {
+      "t": 0.0,
+      "feet": "both"
+    },
+    {
+      "t": 1.293,
+      "feet": "none"
+    },
+    {
+      "t": 1.469,
+      "feet": "both"
+    }
+  ],
+  "flight": {
+    "com_rise_m": 0.04,
+    "max_takeoff_speed_mps": 0.9,
+    "max_landing_load_mg": 4.0,
+    "toe_first": true
+  },
+  "keyframes": [
+    {
+      "t": 0.0,
+      "note": "standing"
+    },
+    {
+      "t": 1.0,
+      "joints_deg": {
+        "hip_pitch": -94.0,
+        "knee": 105.0,
+        "ankle_pitch": -41.0
+      },
+      "note": "crouch: knee 105 deg, torso 30 deg forward, CoM over the feet (analysis/hop.py)"
+    },
+    {
+      "t": 1.2,
+      "joints_deg": {
+        "hip_pitch": -94.0,
+        "knee": 105.0,
+        "ankle_pitch": -41.0
+      },
+      "note": "hold, then push (time-optimal push of analysis/hop.py)"
+    },
+    {
+      "t": 1.293,
+      "joints_deg": {
+        "hip_pitch": -43.7,
+        "knee": 58.3,
+        "ankle_pitch": -27.5
+      },
+      "note": "take-off: knee 60 deg, CoM 0.89 m/s up, torso 14 deg (zero angular momentum)"
+    },
+    {
+      "t": 1.384,
+      "joints_deg": {
+        "hip_pitch": -57.2,
+        "knee": 109.8,
+        "ankle_pitch": -46.4
+      },
+      "note": "apex: knee 80 deg, hips 0 deg flexed, soles 8.3 cm up"
+    },
+    {
+      "t": 1.469,
+      "joints_deg": {
+        "hip_pitch": -53.5,
+        "knee": 80.0,
+        "ankle_pitch": -20.0
+      },
+      "note": "touchdown toes first (20 deg), knee 80 deg"
+    },
+    {
+      "t": 1.719,
+      "joints_deg": {
+        "hip_pitch": -58.1,
+        "knee": 89.6,
+        "ankle_pitch": -44.8
+      },
+      "note": "absorbed (knee 90 deg), torso coming upright"
+    },
+    {
+      "t": 2.6,
+      "note": "standing again"
+    }
+  ],
+  "reward_weights": {
+    "joint_tracking": 2.0,
+    "torso_orientation": 1.5,
+    "feet_contact": 2.0,
+    "flight_height": 0.5,
+    "landing_load": 1.0,
+    "foot_clearance": 8.0
+  }
+}

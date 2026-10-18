@@ -259,3 +259,36 @@ def getup_scene_spec_fn(spec: mujoco.MjSpec) -> None:
     terrain = spec.body("terrain")
     for g in terrain.geoms:
         g.conaffinity = g.conaffinity | GETUP_FLOOR_BIT
+def qdd_envelope_actuators(delay_max_lag: int = 2, v_bus: float = 22.0) -> tuple:
+    """Same gains / driver clamps as the actuators above, as explicit PD with the
+    motors' torque-speed envelope (actuator/qdd_motor.py, robot repo analysis/hop.py
+    tmax): what a jump needs. delay_max_lag in physics steps (0-10 ms)."""
+    from mjlab_microduck.actuator.qdd_motor import QddMotorActuatorCfg
+
+    d = dict(delay_min_lag=0, delay_max_lag=delay_max_lag, v_bus=v_bus)
+    return (
+        QddMotorActuatorCfg(
+            target_names_expr=(r".*_hip_yaw", r".*_hip_roll"),
+            stiffness=HIP_YAW_ROLL_KP,
+            damping=HIP_YAW_ROLL_KD,
+            effort_limit=GIM6010_PEAK,
+            motor="6010",
+            **d,
+        ),
+        QddMotorActuatorCfg(
+            target_names_expr=(r".*_hip_pitch", r".*_knee"),
+            stiffness=HIP_PITCH_KNEE_KP,
+            damping=HIP_PITCH_KNEE_KD,
+            effort_limit=GIM6010_PEAK,
+            motor="6010",
+            **d,
+        ),
+        QddMotorActuatorCfg(
+            target_names_expr=(r".*_ankle_pitch",),
+            stiffness=ANKLE_KP,
+            damping=ANKLE_KD,
+            effort_limit=ANKLE_PEAK,
+            motor="3510",
+            **d,
+        ),
+    )
