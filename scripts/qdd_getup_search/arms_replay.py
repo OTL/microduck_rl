@@ -69,7 +69,7 @@ def main():
     S.arm = G.ArmCfg(length=a.arm_len, elbow=a.elbow, sh_range=(-3.3, a.sh_back))
     S.m = G.build_model(S.arm)
     S.nj = S.m.nq - 7
-    S.npk = 5 if a.elbow else 4
+    S.npk = G.n_per_key(a)
     kp, kd, eff = G.leg_gains()
     na = S.nj - 10
     S.kp = torch.tensor(kp + [S.arm.kp] * na)

@@ -2,7 +2,7 @@
 
 Each candidate is a left/right-mirrored keyframe motion: from wherever the fall left
 the joints, ramp through NK keys (hip pitch, knee, ankle, shoulder [, elbow]) to the
-default pose. Every candidate is scored on NS real falls from the fall library
+default pose. With --asym each side has its own keys, plus hip roll. Every candidate is scored on NS real falls from the fall library
 (prone or supine), with floor friction x0.6-1.2 and kp x0.9-1.1 randomised, so one
 generation is POP*NS parallel worlds. Score: ends standing (bonus), torso up and at
 standing height, plus the best "upright x height" reached on the way (shaping).
@@ -209,7 +209,7 @@ class Search:
         self.arm = ArmCfg(length=a.arm_len, elbow=a.elbow, sh_range=(-3.3, a.sh_back))
         self.m = build_model(self.arm)
         self.nj = self.m.nq - 7
-        self.npk = 5 if a.elbow else 4  # params per key
+        self.npk = n_per_key(a)  # params per key
         self.W = a.pop * a.ns
         self.sim = Simulation(
             self.W, SimulationCfg(nconmax=64, njmax=256), self.m, device
@@ -235,11 +235,19 @@ class Search:
         P, NK, k = X.shape[0], self.a.nk, self.npk
         p = X[:, : NK * k].reshape(P, NK, k)
         z = torch.zeros(P, NK, device=self.dev)
-        leg = torch.stack([z, z, p[..., 0], p[..., 1], p[..., 2]], -1)
-        legr = leg.clone()
-        q = [leg, legr, p[..., 3:4], p[..., 3:4]]
-        if self.a.elbow:
-            q = [leg, legr, p[..., 3:4], p[..., 4:5], p[..., 3:4], p[..., 4:5]]
+        if getattr(self.a, "asym", False):
+            # each side its own [hip_roll, hip_pitch, knee, ankle, shoulder (, elbow)]
+            h = k // 2
+            sides = []
+            for s in (p[..., :h], p[..., h:]):
+                sides.append(torch.stack([z, s[..., 0], s[..., 1], s[..., 2], s[..., 3]], -1))
+            q = [sides[0], sides[1], p[..., 4:h], p[..., h + 4 :]]
+        else:
+            leg = torch.stack([z, z, p[..., 0], p[..., 1], p[..., 2]], -1)
+            legr = leg.clone()
+            q = [leg, legr, p[..., 3:4], p[..., 3:4]]
+            if self.a.elbow:
+                q = [leg, legr, p[..., 3:4], p[..., 4:5], p[..., 3:4], p[..., 4:5]]
         # joint order: l leg (5), r leg (5), then l arm chain, r arm chain
         q = torch.cat(q, -1)
         q = torch.clamp(q, self.lo, self.hi)
@@ -358,6 +366,20 @@ class Search:
         return s.view(P, ns).mean(1), ok.view(P, ns).float().mean(1)
 
 
+def n_per_key(a) -> int:
+    """Search parameters per keyframe: mirrored = one side, --asym = both sides + hip roll."""
+    side = 5 if a.elbow else 4
+    return 2 * (side + 1) if getattr(a, "asym", False) else side
+
+
+def sym_to_asym(x: np.ndarray, nk: int, elbow: bool) -> np.ndarray:
+    """A mirrored parameter vector as the same motion in --asym form (hip roll 0)."""
+    side = 5 if elbow else 4
+    k = x[: nk * side].reshape(nk, side)
+    one = np.c_[np.zeros(nk), k]
+    return np.r_[np.c_[one, one].ravel(), x[nk * side :]]
+
+
 def seed_keys(face: str, nk: int, elbow: bool) -> np.ndarray:
     d0 = [-0.39, 0.79, -0.39, 0.0]
     if face == "prone":  # push the chest up with the arms, tuck the legs, table, stand
@@ -424,7 +446,14 @@ def main():
         action="store_false",
         help="no friction / kp randomisation",
     )
-    ap.add_argument("--init", type=Path)
+    ap.add_argument(
+        "--asym",
+        action="store_true",
+        help="left and right keys searched separately, plus hip roll",
+    )
+    ap.add_argument("--init", type=Path, help="start from a result (.npz)")
+    ap.add_argument("--init-which", default="best", choices=("best", "mu"))
+    ap.add_argument("--sd0", type=float, default=0.4, help="initial key spread (rad)")
     ap.add_argument("--device", default="cuda:0")
     ap.add_argument("--out", type=Path, required=True)
     a = ap.parse_args()
@@ -432,9 +461,16 @@ def main():
     gen = torch.Generator(device=a.device)
     gen.manual_seed(a.seed)
     rng = np.random.default_rng(a.seed)
-    mu = np.load(a.init)["mu"] if a.init else seed_keys(a.face, a.nk, a.elbow)
+    if a.init:
+        f = np.load(a.init)
+        mu = f[a.init_which] if a.init_which in f and f[a.init_which].ndim else f["mu"]
+    else:
+        mu = seed_keys(a.face, a.nk, a.elbow)
     nkey = a.nk * S.npk
-    sd = np.r_[[0.4] * nkey, [0.15] * a.nk]
+    if a.asym and mu.size == a.nk * (5 if a.elbow else 4) + a.nk:
+        mu = sym_to_asym(mu, a.nk, a.elbow)
+    assert mu.size == nkey + a.nk, (mu.size, nkey + a.nk)
+    sd = np.r_[[a.sd0] * nkey, [0.15] * a.nk]
     best = (-1e9, None, 0.0)
     a.out.parent.mkdir(parents=True, exist_ok=True)
     for it in range(a.iters):
