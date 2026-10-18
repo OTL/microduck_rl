@@ -361,7 +361,9 @@ def add_arms(spec: mujoco.MjSpec) -> mujoco.MjSpec:
         )
         arm.add_joint(name=f"{nm}_shoulder_pitch", range=list(ARM_SHOULDER_RANGE), **jopt)
         fore = arm.add_body(name=f"{nm}_forearm", pos=[0, 0, -ARM_UPPER])
-        fore.add_joint(name=f"{nm}_elbow", range=list(ARM_ELBOW_RANGE), **jopt)
+        # elbow axis -y: + bends the forearm forward (+x), like a human elbow
+        # (OTL 2026-10-18; with +y the forearm bent backward)
+        fore.add_joint(name=f"{nm}_elbow", range=list(ARM_ELBOW_RANGE), **{**jopt, "axis": [0, -1, 0]})
         # shoulder mount, fixed to the torso (own body: the torso has an explicit inertial)
         torso.add_body(
             name=f"{nm}_shoulder_mount",

@@ -91,7 +91,7 @@ def build_model(arm: ArmCfg) -> mujoco.MjModel:
             f.add_joint(
                 name=f"{nm}_elbow",
                 type=mujoco.mjtJoint.mjJNT_HINGE,
-                axis=[0, 1, 0],
+                axis=[0, -1, 0],  # + bends the forearm forward (+x)
                 range=list(arm.el_range),
                 armature=0.00064,
                 damping=0.05,

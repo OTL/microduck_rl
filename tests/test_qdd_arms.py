@@ -198,3 +198,29 @@ def test_arm_swing_target_against_the_legs():
     assert t[1, 0] == pytest.approx(s0 - A.ARM_SWING_AMP)
     assert t[0, 3] > t[0, 1]  # the forward (right) arm bends its elbow more
     assert torch.allclose(t[2], torch.tensor([s0, A.ARM_WALK_ELBOW0, s0, A.ARM_WALK_ELBOW0]))
+
+
+def test_elbow_bends_forward_shoulder_minus_is_forward():
+    """OTL 2026-10-18: elbow + bends the forearm forward (+x, the walking direction,
+    where the knees point); shoulder - swings the arm forward."""
+    import mujoco
+
+    m = rc.get_qdd_biped_arms_spec().compile()
+    d = mujoco.MjData(m)
+
+    def hand_x(sh, el):
+        d.qpos[:] = 0
+        d.qpos[3] = 1
+        for nm in ("l", "r"):
+            d.qpos[m.joint(f"{nm}_shoulder_pitch").qposadr[0]] = sh
+            d.qpos[m.joint(f"{nm}_elbow").qposadr[0]] = el
+        mujoco.mj_forward(m, d)
+        out = []
+        for nm in ("l", "r"):
+            b = m.body(f"{nm}_forearm").id
+            out.append((d.xpos[b] + d.xmat[b].reshape(3, 3) @ [0, 0, -0.15])[0] - d.xpos[m.body(f"{nm}_upper_arm").id][0])
+        return np.array(out)
+
+    assert (hand_x(0.0, 1.0) > 0.1).all()
+    assert (hand_x(-0.5, 0.0) > 0.1).all()
+    assert (hand_x(0.5, 0.0) < -0.1).all()

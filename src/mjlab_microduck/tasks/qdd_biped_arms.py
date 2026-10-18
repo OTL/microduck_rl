@@ -70,7 +70,7 @@ IMPLICIT_KD_MIN_DT = 0.004  # s: physics steps this long put the legs' kd in the
 # default pose (action offset, standing) and the swing reference
 # (mdp.qdd_arm_swing_tracking: each shoulder against its own leg, amplitude ~ the
 # commanded forward speed).
-ARM_WALK_SHOULDER0 = -0.1  # rad, slightly forward (shoulder - = forward)
+ARM_WALK_SHOULDER0 = 0.15  # rad, slightly back (shoulder + = back; OTL 2026-10-18)
 ARM_WALK_ELBOW0 = 1.0  # rad (57 deg), forearm bent forward
 ARM_SWING_AMP = 0.35  # rad (20 deg) each way at ARM_SWING_V_FULL
 ARM_SWING_V_FULL = 0.5  # m/s, the top of the forward command range
