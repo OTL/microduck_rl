@@ -15,7 +15,7 @@ import numpy as np
 import torch
 
 
-def rollout(m, S, x, q0_state, rec=False):
+def rollout(m, S, x, q0_state, rec=False, speed_limit=True):
     keys, durs = S.keys(torch.tensor(x[None], dtype=torch.float32))
     keys, durs = keys[0].numpy(), durs[0].numpy()
     d = mujoco.MjData(m)
@@ -29,18 +29,25 @@ def rollout(m, S, x, q0_state, rec=False):
         (allk[j], allk[j + 1], durs[j]) for j in range(a.nk)
     ]
     frames = []
+    vmax = np.array(G.vmax_list(a.elbow))
+    peak = np.zeros_like(vmax)
     for p, q, du in segs + [(allk[-1], allk[-1], a.hold)]:
         n = round(du / G.DT)
         for i in range(n):
             tgt = p + min(1, (i + 1) / n) * (q - p)
-            d.qfrc_applied[6:] = np.clip(
-                kp * (tgt - d.qpos[7:]) - kd * d.qvel[6:], -eff, eff
-            )
+            tau = kp * (tgt - d.qpos[7:]) - kd * d.qvel[6:]
+            if speed_limit:
+                lo, hi = G.torque_limits(d.qvel[6:], eff, vmax)
+            else:
+                lo, hi = -eff, eff
+            d.qfrc_applied[6:] = np.clip(tau, lo, hi)
             mujoco.mj_step(m, d)
+            peak = np.maximum(peak, np.abs(d.qvel[6:]) / vmax)
             if rec and i % 10 == 0:
                 frames.append(d.qpos.copy())
     up, z = d.xmat[1][8], d.qpos[2]
-    return (up > 0.9 and abs(z - G.rc.STAND_BASE_Z) < 0.03), frames
+    ok = up > 0.9 and abs(z - G.rc.STAND_BASE_Z) < 0.03
+    return ok, (frames if rec else peak)
 
 
 def main():
@@ -49,6 +56,7 @@ def main():
     ap.add_argument("--which", default="best", choices=("best", "mu"))
     ap.add_argument("--n", type=int, default=32)
     ap.add_argument("--gif", type=Path)
+    ap.add_argument("--speed-limit", choices=("on", "off"), default="on")
     r = ap.parse_args()
     f = np.load(r.result)
     args = json.loads(f["args"].item())
@@ -71,7 +79,11 @@ def main():
     x = f[r.which]
     st = G.fall_starts(a.face, r.n, 1234)
     st = np.c_[st, np.zeros((len(st), na))]
-    oks = [rollout(S.m, S, x, s)[0] for s in st]
+    sl = r.speed_limit == "on"
+    res = [rollout(S.m, S, x, s, speed_limit=sl) for s in st]
+    oks = [o for o, _ in res]
+    peak = np.max([p for _, p in res], 0)
+    print("peak |qd| / no-load speed per joint:", np.round(peak, 2))
     print(
         f"{r.which}: stood {sum(oks)} / {len(oks)} ({a.face}, arm {a.arm_len} m, elbow {a.elbow})"
     )
@@ -82,7 +94,7 @@ def main():
             i for i, o in enumerate(oks) if not o
         ][:1]
         idx = (idx + [0, 1, 2])[:3]
-        F = [rollout(S.m, S, x, st[i], rec=True)[1] for i in idx]
+        F = [rollout(S.m, S, x, st[i], rec=True, speed_limit=sl)[1] for i in idx]
         T = min(len(q) for q in F)
         m = S.m
         d = mujoco.MjData(m)

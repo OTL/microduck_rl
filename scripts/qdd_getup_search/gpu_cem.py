@@ -157,6 +157,29 @@ def leg_gains():
     return kp, kd, eff
 
 
+# No-load speeds (rad/s), robo robot/model.py MOTORS: GIM6010-8 420 rpm, GIM3510-8 405 rpm,
+# GIM4310-10 228 rpm. The torque available in the direction the joint already turns falls
+# linearly to 0 at this speed (back-EMF); braking keeps the full torque.
+VMAX_LEG = [44.0, 44.0, 44.0, 44.0, 42.4] * 2
+VMAX_SHOULDER, VMAX_ELBOW = 23.9, 42.4
+
+
+def torque_limits(qd, eff, vmax):
+    """(lower, upper) torque bounds with the linear torque-speed limit (numpy or torch)."""
+    if isinstance(qd, np.ndarray):
+        up = eff * np.clip(1 - np.maximum(qd, 0) / vmax, 0, 1)
+        lo = -eff * np.clip(1 - np.maximum(-qd, 0) / vmax, 0, 1)
+    else:
+        up = eff * torch.clamp(1 - qd.clamp(min=0) / vmax, 0, 1)
+        lo = -eff * torch.clamp(1 - (-qd).clamp(min=0) / vmax, 0, 1)
+    return lo, up
+
+
+def vmax_list(elbow: bool) -> list[float]:
+    arm = [VMAX_SHOULDER, VMAX_ELBOW] if elbow else [VMAX_SHOULDER]
+    return VMAX_LEG + arm * 2
+
+
 def default_legs() -> np.ndarray:
     k = math.radians(rc.CROUCH_KNEE_DEG)
     return np.array([0.0, 0.0, -k / 2, k, -k / 2] * 2)
@@ -198,6 +221,7 @@ class Search:
         self.kp = t(kp + [self.arm.kp] * na)
         self.kd = t(kd + [self.arm.kd] * na)
         self.eff = t(eff + [self.arm.effort] * na)
+        self.vmax = t(vmax_list(a.elbow))
         self.lo = t(self.m.jnt_range[1:, 0])
         self.hi = t(self.m.jnt_range[1:, 1])
         self.q0 = t(np.r_[default_legs(), np.zeros(na)])
@@ -297,9 +321,12 @@ class Search:
                     allk[ar, kc + 1] - allk[ar, kc]
                 )
             q, qd = d.qpos[:, 7:], d.qvel[:, 6:]
-            d.qfrc_applied[:, 6:] = torch.clamp(
-                kps * (tgt - q) - self.kd * qd, -self.eff, self.eff
-            )
+            tau = kps * (tgt - q) - self.kd * qd
+            if a.speed_limit:
+                lo, hi = torque_limits(qd, self.eff, self.vmax)
+                d.qfrc_applied[:, 6:] = torch.maximum(torch.minimum(tau, hi), lo)
+            else:
+                d.qfrc_applied[:, 6:] = torch.clamp(tau, -self.eff, self.eff)
             self.sim.step()
             if i % 10 == 0:
                 up = d.xmat[:, 1, 2, 2]
@@ -374,6 +401,12 @@ def main():
     ap.add_argument("--prep", type=float, default=1.0)
     ap.add_argument("--hold", type=float, default=1.5)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument(
+        "--no-speed-limit",
+        dest="speed_limit",
+        action="store_false",
+        help="torque clip only (results before 2026-10-18 03:00)",
+    )
     ap.add_argument(
         "--no-dr",
         dest="dr",
