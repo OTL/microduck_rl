@@ -12,6 +12,13 @@ run() {
     --iters "$ITERS" --out "$OUT/$tag.npz" "$@" 2>&1 | grep -v -E "^Module |took .* ms" | tee "$OUT/$tag.log" | tail -n 3
 }
 # refine the symmetric supine candidate (25/32) without the mirror constraint
+# (sd0 0.2 / mu-lr 0.7 lost the candidate in one generation: 91 dims x 0.2 rad is a big jump)
+STAGE=${STAGE:-all}
+if [ "$STAGE" = refine ]; then
+  run supine_asym_from_v2_small --face supine --init logs/getup_arms_v2/supine_L20_elbow.npz \
+    --sd0 0.04 --mu-lr 0.3 --sd-floor 0.002 --ns 16 --pop 256
+  exit 0
+fi
 run supine_asym_from_v2 --face supine --init logs/getup_arms_v2/supine_L20_elbow.npz --sd0 0.2
 # fresh asymmetric searches
 run supine_asym --face supine

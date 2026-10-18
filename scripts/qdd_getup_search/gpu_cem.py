@@ -454,6 +454,8 @@ def main():
     ap.add_argument("--init", type=Path, help="start from a result (.npz)")
     ap.add_argument("--init-which", default="best", choices=("best", "mu"))
     ap.add_argument("--sd0", type=float, default=0.4, help="initial key spread (rad)")
+    ap.add_argument("--mu-lr", type=float, default=0.7, help="CEM mean step toward the elite")
+    ap.add_argument("--sd-floor", type=float, default=0.005)
     ap.add_argument("--device", default="cuda:0")
     ap.add_argument("--out", type=Path, required=True)
     a = ap.parse_args()
@@ -477,14 +479,16 @@ def main():
         t0 = time.time()
         X = mu + sd * rng.normal(size=(a.pop, mu.size))
         X[0] = mu
+        if best[1] is not None:  # elitism: the best so far is re-scored every generation
+            X[1] = best[1]
         ids = torch.tensor(rng.choice(a.n_starts, a.ns, replace=False), device=a.device)
         s, ok = S.evaluate(
             torch.tensor(X, dtype=torch.float32, device=a.device), ids, gen
         )
         s, ok = s.cpu().numpy(), ok.cpu().numpy()
         el = np.argsort(s)[-max(8, a.pop // 16) :]
-        mu = 0.3 * mu + 0.7 * X[el].mean(0)
-        sd = 0.5 * sd + 0.5 * X[el].std(0) + 0.005
+        mu = (1 - a.mu_lr) * mu + a.mu_lr * X[el].mean(0)
+        sd = 0.5 * sd + 0.5 * X[el].std(0) + a.sd_floor
         if s[el[-1]] > best[0]:
             best = (s[el[-1]], X[el[-1]].copy(), ok[el[-1]])
         print(
