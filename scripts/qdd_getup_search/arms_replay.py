@@ -19,7 +19,7 @@ def cpu_search(a) -> "G.Search":
     """A CPU Search object (model, gains, key builder) for a saved result's args."""
     S = G.Search.__new__(G.Search)
     S.a, S.dev = a, "cpu"
-    S.arm = G.ArmCfg(length=a.arm_len, elbow=a.elbow, sh_range=(-3.3, a.sh_back))
+    S.arm = G.arm_cfg(a)
     S.m = G.build_model(S.arm)
     S.nj = S.m.nq - 7
     S.npk = G.n_per_key(a)
@@ -48,7 +48,7 @@ def rollout(m, S, x, q0_state, rec=False, speed_limit=True):
         (allk[j], allk[j + 1], durs[j]) for j in range(a.nk)
     ]
     frames = []
-    vmax = np.array(G.vmax_list(a.elbow))
+    vmax = np.array(G.vmax_list(a.elbow, getattr(a, "cad", False)))
     peak = np.zeros_like(vmax)
     spin = 0.0
     for p, q, du in segs + [(allk[-1], allk[-1], a.hold)]:

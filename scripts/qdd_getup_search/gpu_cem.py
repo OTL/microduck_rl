@@ -14,6 +14,12 @@ Run on the GPU box (yatai):
   uv run python scripts/qdd_getup_search/gpu_cem.py --face prone --arm-len 0.20 \
       --elbow --iters 150 --out logs/getup_arms/prone_L20_elbow.npz
 
+The CAD v2 arm of the training model (25 cm = upper 10 + fore 15, plates at y 145 /
+178.5 mm, GIM3510-8 on both joints, elbow + bends forward):
+
+  uv run python scripts/qdd_getup_search/gpu_cem.py --face supine --cad \
+      --iters 150 --out logs/getup_arms/supine_cad.npz
+
 Plain-MuJoCo replay / video: scripts/qdd_getup_search/arms_replay.py.
 """
 
@@ -47,6 +53,38 @@ class ArmCfg:
     effort: float = 5.6  # GIM4310-10 peak
     mass_motor: float = 0.227
     mass_link: float = 0.06
+    # --cad: the CAD v2 arm (robot/qdd_biped_constants.py ARM_*); None = the old study
+    upper: float | None = None  # shoulder -> elbow (None: length / 2)
+    upper_y: float = 0.045  # link capsule y from the shoulder
+    fore_y: float | None = None  # forearm capsule y (None: upper_y)
+    mass_upper: float | None = None  # (None: mass_link)
+    mass_fore: float | None = None
+    mass_shoulder_motor: float | None = None  # (None: mass_motor)
+    sh_armature: float = 1.5e-3  # GIM4310-10 (--cad: GIM3510-8)
+
+
+def arm_cfg(a) -> ArmCfg:
+    """ArmCfg from the search args; --cad uses the CAD v2 arm the training model has
+    (25 cm = upper 10 + fore 15, plates at y 145 / 178.5 mm, GIM3510-8 on both)."""
+    sh = (-3.3, a.sh_back)
+    if not getattr(a, "cad", False):
+        return ArmCfg(length=a.arm_len, elbow=a.elbow, sh_range=sh)
+    return ArmCfg(
+        length=rc.ARM_LENGTH,
+        elbow=True,
+        sh_range=sh,
+        el_range=rc.ARM_ELBOW_RANGE,
+        kp=rc.ARM_KP,
+        kd=rc.ARM_KD,
+        effort=rc.ARM_PEAK,
+        upper=rc.ARM_UPPER,
+        upper_y=rc.ARM_UPPER_Y,
+        fore_y=rc.ARM_FORE_Y,
+        mass_upper=rc.ARM_UPPER_MASS,
+        mass_fore=rc.ARM_FORE_MASS,
+        mass_shoulder_motor=rc.ARM_MOTOR["mass"] + rc.ARM_SHOULDER_MOUNT_MASS,
+        sh_armature=rc.ARM_MOTOR["armature"],
+    )
 
 
 def build_model(arm: ArmCfg) -> mujoco.MjModel:
@@ -63,7 +101,7 @@ def build_model(arm: ArmCfg) -> mujoco.MjModel:
             type=mujoco.mjtJoint.mjJNT_HINGE,
             axis=[0, 1, 0],
             range=list(arm.sh_range),
-            armature=1.5e-3,
+            armature=arm.sh_armature,
             damping=0.05,
             frictionloss=0.05,
         )
@@ -72,20 +110,21 @@ def build_model(arm: ArmCfg) -> mujoco.MjModel:
             size=[0.0265, 0.02, 0],
             pos=[0, s * 0.02, 0],
             quat=[0.7071, 0.7071, 0, 0],
-            mass=arm.mass_motor,
+            mass=arm.mass_motor if arm.mass_shoulder_motor is None else arm.mass_shoulder_motor,
             contype=0,
             conaffinity=0,
             group=2,
         )
-        y = s * 0.045
+        y = s * arm.upper_y
+        yf = y if arm.fore_y is None else s * arm.fore_y
         if arm.elbow:
-            up = arm.length / 2
+            up = arm.length / 2 if arm.upper is None else arm.upper
             b.add_geom(
                 name=f"{nm}_upper_arm_collision",
                 type=mujoco.mjtGeom.mjGEOM_CAPSULE,
                 fromto=[0, y, 0, 0, y, -up],
                 size=[0.014, 0, 0],
-                mass=arm.mass_link,
+                mass=arm.mass_link if arm.mass_upper is None else arm.mass_upper,
             )
             f = b.add_body(name=f"{nm}_forearm", pos=[0, 0, -up])
             f.add_joint(
@@ -100,7 +139,7 @@ def build_model(arm: ArmCfg) -> mujoco.MjModel:
             f.add_geom(  # elbow motor (ankle class, GIM3510-8)
                 type=mujoco.mjtGeom.mjGEOM_CYLINDER,
                 size=[0.023, 0.026, 0],
-                pos=[0, y, 0],
+                pos=[0, y, 0],  # CAD v2: elbow motor centre y 42 mm = the upper-arm plate
                 quat=[0.7071, 0.7071, 0, 0],
                 mass=0.26,
                 contype=0,
@@ -110,9 +149,9 @@ def build_model(arm: ArmCfg) -> mujoco.MjModel:
             f.add_geom(
                 name=f"{nm}_forearm_collision",
                 type=mujoco.mjtGeom.mjGEOM_CAPSULE,
-                fromto=[0, y, 0, 0, y, -(arm.length - up)],
+                fromto=[0, yf, 0, 0, yf, -(arm.length - up)],
                 size=[0.014, 0, 0],
-                mass=arm.mass_link,
+                mass=arm.mass_link if arm.mass_fore is None else arm.mass_fore,
             )
         else:
             b.add_geom(
@@ -175,8 +214,9 @@ def torque_limits(qd, eff, vmax):
     return lo, up
 
 
-def vmax_list(elbow: bool) -> list[float]:
-    arm = [VMAX_SHOULDER, VMAX_ELBOW] if elbow else [VMAX_SHOULDER]
+def vmax_list(elbow: bool, cad: bool = False) -> list[float]:
+    sh = VMAX_ELBOW if cad else VMAX_SHOULDER  # --cad: GIM3510-8 on the shoulder too
+    arm = [sh, VMAX_ELBOW] if elbow else [sh]
     return VMAX_LEG + arm * 2
 
 
@@ -206,7 +246,7 @@ class Search:
         from mjlab.sim.sim import Simulation, SimulationCfg
 
         self.a, self.dev = a, device
-        self.arm = ArmCfg(length=a.arm_len, elbow=a.elbow, sh_range=(-3.3, a.sh_back))
+        self.arm = arm_cfg(a)
         self.m = build_model(self.arm)
         self.nj = self.m.nq - 7
         self.npk = n_per_key(a)  # params per key
@@ -221,7 +261,7 @@ class Search:
         self.kp = t(kp + [self.arm.kp] * na)
         self.kd = t(kd + [self.arm.kd] * na)
         self.eff = t(eff + [self.arm.effort] * na)
-        self.vmax = t(vmax_list(a.elbow))
+        self.vmax = t(vmax_list(a.elbow, getattr(a, "cad", False)))
         self.lo = t(self.m.jnt_range[1:, 0])
         self.hi = t(self.m.jnt_range[1:, 1])
         self.q0 = t(np.r_[default_legs(), np.zeros(na)])
@@ -416,6 +456,9 @@ def main():
     ap.add_argument("--arm-len", type=float, default=0.20)
     ap.add_argument("--elbow", action="store_true")
     ap.add_argument(
+        "--cad", action="store_true", help="the CAD v2 arm of the training model (sets --arm-len 0.25 --elbow)"
+    )
+    ap.add_argument(
         "--sh-back", type=float, default=2.2, help="shoulder range backward (rad)"
     )
     ap.add_argument("--nk", type=int, default=7)
@@ -459,6 +502,8 @@ def main():
     ap.add_argument("--device", default="cuda:0")
     ap.add_argument("--out", type=Path, required=True)
     a = ap.parse_args()
+    if a.cad:
+        a.arm_len, a.elbow = rc.ARM_LENGTH, True
     S = Search(a, a.device)
     gen = torch.Generator(device=a.device)
     gen.manual_seed(a.seed)

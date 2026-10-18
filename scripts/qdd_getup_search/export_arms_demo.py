@@ -35,7 +35,7 @@ def record(S, x, q_start):
     d.qpos[:] = q_start
     mujoco.mj_forward(m, d)
     kp, kd, eff = S.kp.numpy(), S.kd.numpy(), S.eff.numpy()
-    vmax = np.array(G.vmax_list(a.elbow))
+    vmax = np.array(G.vmax_list(a.elbow, getattr(a, "cad", False)))
     allk = np.r_[keys, S.q0.numpy()[None]]
     segs = [(d.qpos[7:].copy(), allk[0], a.prep)] + [(allk[j], allk[j + 1], durs[j]) for j in range(a.nk)]
     every = round(FRAME_DT / G.DT)
