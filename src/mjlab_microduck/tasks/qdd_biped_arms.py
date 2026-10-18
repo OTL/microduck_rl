@@ -1,7 +1,7 @@
 """QDD biped with arms (2026-10-18): the task variants on the robot with arms.
 
 The arms (robot/qdd_biped_constants.py add_arms: shoulder pitch + elbow each,
-GIM3510-8, 0.64 kg per arm; 6.61 -> 7.89 kg) are there so the robot can get up
+GIM3510-8, 25 cm, 0.74 kg per arm (CAD v2); 6.61 -> 8.10 kg) are there so the robot can get up
 with both feet together (design study: scripts/qdd_getup_search/). Two kinds of
 variant:
 
@@ -9,7 +9,7 @@ variant:
     10-D action as without arms (legs only), so the controller runs it like the
     leg-only policy; the arm joints are held at 0 (hanging down) by their own PD
     (kp ARM_KP, kd ARM_KD), which the controller must do too (``held_joints`` in
-    the ONNX metadata). Trained again because the arms change the mass (+1.28 kg)
+    the ONNX metadata). Trained again because the arms change the mass (+1.49 kg)
     and its distribution.
   - arms IN THE POLICY (get-up): 14 joints in the obs and the action (48-D obs:
     the leg-only get-up's 36-D + 3 x 4 arm terms), its own policy_io

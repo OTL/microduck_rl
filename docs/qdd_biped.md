@@ -198,7 +198,7 @@ python3 bench_duck.py --task Mjlab-Velocity-Flat-QddBiped --envs 64 --iters 5
 
 ## 腕つき（2026-10-18）
 
-腕で両足をそろえて起き上がれるように、肩と肘の 2 軸の腕（肩の軸から手先まで 20 cm、モータは両方 GIM3510-8、腕 1 本 0.64 kg、全体 6.61 → 7.89 kg）を付けたモデルと課題。形は探索（`scripts/qdd_getup_search/`）で決めた設計案で、ロボットのリポジトリの `robot/model.py` にはまだ入っていない（`robot/qdd_biped_constants.py` の `add_arms`）。
+腕で両足をそろえて起き上がれるように、肩と肘の 2 軸の腕（肩の軸から手先まで 25 cm＝上腕 10＋前腕 15、手先に TPU のパッド、モータは両方 GIM3510-8、腕 1 本 0.74 kg、全体 6.61 → 8.10 kg。10/18 OTLさん承認の CAD 第 2 版の値）を付けたモデルと課題。長さ 20 cm までは探索（`scripts/qdd_getup_search/`）で決め、25 cm は CAD で決めた。手本（getup_demo_traj_arms.npz）は 20 cm の探索の動きのまま（25 cm では開ループで立たない。学習の手がかりとして使い、path の状態は床にめり込まないよう持ち上げる）。ロボットのリポジトリの `robot/model.py` にはまだ入っていない（`robot/qdd_biped_constants.py` の `add_arms`）。
 
 | 課題 | 腕 | 観測 / 行動 |
 |---|---|---|

@@ -15,7 +15,9 @@ def test_arms_model_joints_and_mass():
     assert names == rc.QDD_ARMS_JOINT_NAMES  # legs first, then the arms
     base = rc.get_qdd_biped_spec().compile().body_subtreemass[1]
     added = m.body_subtreemass[1] - base
-    assert abs(added - 4 * (rc.ARM_MOTOR["mass"] + rc.ARM_LINK_MASS)) < 1e-6  # 1.28 kg
+    per_arm = 2 * rc.ARM_MOTOR["mass"] + rc.ARM_UPPER_MASS + rc.ARM_FORE_MASS + rc.ARM_SHOULDER_MOUNT_MASS
+    assert abs(added - 2 * per_arm) < 1e-6  # CAD v2: about 0.74 kg per arm
+    assert abs(per_arm - 0.743) < 0.01
     for n in ("l_shoulder_pitch", "r_shoulder_pitch"):
         assert tuple(m.joint(n).range) == pytest.approx(rc.ARM_SHOULDER_RANGE)
     # arm links are collision shapes (falls, self-collision)

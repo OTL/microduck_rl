@@ -317,11 +317,24 @@ def sample_path_states(path: Path, n: int, seed: int, m: mujoco.MjModel):
             q[7 + s + 3] = min(q[7 + s + 3], rc.knee_max(q[7 + s + 2]))
         vw *= rng.uniform(0.8, 1.2)
         d.qpos[:] = q
+        q[2] += _floor_lift(m, d)  # a demo made on another arm length can go into the floor
+        d.qpos[:] = q
         mujoco.mj_kinematics(m, d)
         rows.append(
             (float(q[2]), q[3:7].copy(), q[7:].copy(), _tilt_deg(d), vw[:6].copy(), vw[6:].copy(), float(remain[i]), int(i))
         )
     return rows
+
+
+def _floor_lift(m: mujoco.MjModel, d: mujoco.MjData, tol: float = 0.002) -> float:
+    """How far to raise the root so that no geom goes more than ``tol`` into
+    the floor (0 when none does)."""
+    mujoco.mj_forward(m, d)
+    pen = 0.0
+    for c in d.contact[: d.ncon]:
+        if m.geom_bodyid[c.geom1] == 0 or m.geom_bodyid[c.geom2] == 0:
+            pen = min(pen, float(c.dist))
+    return max(0.0, -pen - tol)
 
 
 def _yaw_free(quat: np.ndarray) -> np.ndarray:

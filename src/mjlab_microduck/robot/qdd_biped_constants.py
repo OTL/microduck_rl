@@ -298,7 +298,7 @@ def qdd_envelope_actuators(delay_max_lag: int = 2, v_bus: float = 22.0) -> tuple
 # =============================================================================
 # Arms (2026-10-18, OTL: arms so the robot can get up with both feet together).
 # Design study: scripts/qdd_getup_search/ (gpu_cem.py, arms_replay.py); the
-# drawing OTL approved: 2-axis arm (shoulder pitch + elbow), 20 cm from the
+# drawing OTL approved: 2-axis arm (shoulder pitch + elbow), 25 cm (CAD v2) from the
 # shoulder axis to the hand tip, on the torso side walls. Motors GIM3510-8 on
 # both joints (output-side encoder on every joint, like the ankle; GIM4310-10
 # has none). Not in the robot repo's robot/model.py yet: values here are the
@@ -314,11 +314,23 @@ QDD_ARM_JOINT_NAMES = ("l_shoulder_pitch", "l_elbow", "r_shoulder_pitch", "r_elb
 QDD_ARMS_JOINT_NAMES = QDD_JOINT_NAMES + QDD_ARM_JOINT_NAMES
 QDD_LEG_JOINT_EXPR = (r"^(l|r)_(hip_yaw|hip_roll|hip_pitch|knee|ankle_pitch)$",)
 ARM_SHOULDER_POS = (0.0, 0.103, 0.112)  # torso frame (+y = left), outside the side wall
-ARM_LENGTH = 0.20  # shoulder axis -> hand tip
+# CAD v2 (2026-10-18, cad/arm.py; y from the torso centre, left arm): shoulder motor
+# y 85-138, upper-arm plate 142-148, elbow motor 118.5-171.5, forearm plate
+# 175.5-181.5, TPU hand pad at the tip. Printed parts + wiring: upper arm 95 g
+# (with the shoulder cover) + 15 g wiring, forearm 41 g + pad 6 g + 15 g wiring;
+# the 51 g shoulder mount is fixed to the torso. 0.74 kg per arm with the motors.
+ARM_LENGTH = 0.25  # shoulder axis -> hand tip (pad included)
 ARM_UPPER = 0.10  # shoulder -> elbow
-ARM_LINK_Y = 0.045  # links run outside the shoulder motor
+ARM_UPPER_Y = 0.042  # upper-arm plate centre (y 145 mm) from the shoulder (y 103)
+ARM_FORE_Y = 0.0755  # forearm plate centre (y 178.5 mm)
+ARM_LINK_Y = ARM_UPPER_Y  # (kept for older callers)
 ARM_LINK_RADIUS = 0.014
-ARM_LINK_MASS = 0.06  # PA12 tube, each link
+ARM_UPPER_MASS = 0.110
+ARM_FORE_MASS = 0.062
+ARM_LINK_MASS = (ARM_UPPER_MASS + ARM_FORE_MASS) / 2
+ARM_SHOULDER_MOTOR_Y = (-0.018, 0.035)  # y 85-138 mm, from the shoulder
+ARM_ELBOW_MOTOR_Y = (0.0155, 0.0685)  # y 118.5-171.5 mm
+ARM_SHOULDER_MOUNT_MASS = 0.051  # on the torso
 ARM_SHOULDER_RANGE = (-3.3, 2.2)  # rad; - forward
 ARM_ELBOW_RANGE = (0.0, 2.36)  # rad; + bends the forearm forward
 ARM_MOTOR = dict(mass=0.26, radius=0.023, half_len=0.0265, armature=1.0e-5 * 8**2)  # GIM3510-8
@@ -335,14 +347,25 @@ def add_arms(spec: mujoco.MjSpec) -> mujoco.MjSpec:
         arm = torso.add_body(name=f"{nm}_upper_arm", pos=[sx, s * sy, sz])
         jopt = dict(type=mujoco.mjtJoint.mjJNT_HINGE, axis=[0, 1, 0], armature=mm["armature"], damping=0.05, frictionloss=0.05)
         arm.add_joint(name=f"{nm}_shoulder_pitch", range=list(ARM_SHOULDER_RANGE), **jopt)
-        y = s * ARM_LINK_Y
         fore = arm.add_body(name=f"{nm}_forearm", pos=[0, 0, -ARM_UPPER])
         fore.add_joint(name=f"{nm}_elbow", range=list(ARM_ELBOW_RANGE), **jopt)
-        for body, length in ((arm, ARM_UPPER), (fore, ARM_LENGTH - ARM_UPPER)):
+        # shoulder mount, fixed to the torso (own body: the torso has an explicit inertial)
+        torso.add_body(
+            name=f"{nm}_shoulder_mount",
+            pos=[sx, s * (sy - 0.01), sz],
+            mass=ARM_SHOULDER_MOUNT_MASS,
+            inertia=[2e-5, 2e-5, 2e-5],
+        )
+        parts = (
+            (arm, ARM_UPPER, ARM_UPPER_Y, ARM_UPPER_MASS, ARM_SHOULDER_MOTOR_Y),
+            (fore, ARM_LENGTH - ARM_UPPER, ARM_FORE_Y, ARM_FORE_MASS, ARM_ELBOW_MOTOR_Y),
+        )
+        for body, length, ly, lmass, (my0, my1) in parts:
+            y = s * ly
             # motor at the joint, between the parent and the link (visual: get-up model makes it floor-only)
             body.add_geom(
                 type=mujoco.mjtGeom.mjGEOM_CYLINDER,
-                fromto=[0, s * 0.0, 0, 0, s * 2 * mm["half_len"], 0],
+                fromto=[0, s * my0, 0, 0, s * my1, 0],
                 size=[mm["radius"], 0, 0],
                 mass=mm["mass"],
                 contype=0,
@@ -356,7 +379,7 @@ def add_arms(spec: mujoco.MjSpec) -> mujoco.MjSpec:
                 type=mujoco.mjtGeom.mjGEOM_CAPSULE,
                 fromto=[0, y, 0, 0, y, -length],
                 size=[ARM_LINK_RADIUS, 0, 0],
-                mass=ARM_LINK_MASS,
+                mass=lmass,
                 group=3,
             )
             body.add_geom(

@@ -61,13 +61,17 @@ def main():
     ap.add_argument("result", type=Path)
     ap.add_argument("--which", default="best", choices=("best", "mu"))
     ap.add_argument("--out", type=Path, default=rc.QDD_GETUP_ARMS_DEMO_NPZ)
+    ap.add_argument("--arm-len", type=float, default=None, help="replay on another arm length (default: the search's)")
+    ap.add_argument("--starts", type=int, default=32)
     r = ap.parse_args()
     f = np.load(r.result)
     a = argparse.Namespace(**json.loads(f["args"].item()))
+    if r.arm_len is not None:
+        a.arm_len = r.arm_len
     assert a.face == "supine" and a.elbow, "the arms demo is the supine get-up with elbows"
     S = R.cpu_search(a)
     na = S.nj - 10
-    st = G.fall_starts(a.face, 32, 1234)
+    st = G.fall_starts(a.face, r.starts, 1234)
     st = np.c_[st, np.zeros((len(st), na))]
     for k, s in enumerate(st):
         ok, Q, V = record(S, f[r.which], s)
