@@ -357,3 +357,16 @@ def test_chain_getup_limits_the_bus_current():
     assert sched[0] == (0, float("inf")) and sched[-1][1] == 32.0
     assert [s for s, _ in sched] == sorted(s for s, _ in sched)
     assert "bus_overcurrent" not in A.make_qdd_biped_getup_chain_arms_env_cfg(play=True).terminations
+
+
+@pytest.mark.parametrize("factory", ["make_qdd_biped_velocity_arms_env_cfg", "make_qdd_biped_rough_arms_env_cfg"])
+def test_walking_arms_ankle_torque_cost_is_staged(factory):
+    """Ankle motor heat (2026-10-19): a cost on the squared ankle torques, 0 while the gait
+    is learned, then negative weights rising in stages."""
+    from mjlab_microduck.tasks import qdd_biped_arms as A
+
+    cfg = getattr(A, factory)()
+    assert cfg.rewards["ankle_torque"].weight == 0.0
+    st = cfg.curriculum["ankle_torque_weight"].params["weight_stages"]
+    assert st[0]["weight"] == 0.0 and all(s["weight"] <= 0 for s in st) and st[-1]["weight"] < 0
+    assert [s["step"] for s in st] == sorted(s["step"] for s in st)

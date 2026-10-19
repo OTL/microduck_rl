@@ -265,6 +265,34 @@ def _add_arm_swing(cfg: ManagerBasedRlEnvCfg) -> None:
     )
 
 
+# Ankle motor heat (mechanical review 2026-10-19, OTL chose "reduce it by learning and
+# measure"): the GIM3510-8 ankles are rated 1.0 Nm continuous; arms7 walking measured an RMS
+# of 1.8 Nm at 0.3 m/s on flat ground (2.6-2.8 Nm rough), 0.6-0.7 Nm standing. Cost on the
+# squared ankle torques, introduced after the gait exists (penalties during skill discovery
+# make standing still win) and raised in stages. arms7 at 1.8 Nm RMS: 2 x 1.8^2 = 6.5 Nm^2 ->
+# -0.33 per step at the final weight.
+ANKLE_TORQUE_WEIGHT_STAGES_IT = ((0, 0.0), (500, 0.01), (1000, 0.03), (1500, 0.05))  # (iteration, weight)
+
+
+def _add_ankle_torque_cost(cfg: ManagerBasedRlEnvCfg) -> None:
+    from mjlab.managers.curriculum_manager import CurriculumTermCfg
+    from mjlab.managers.reward_manager import RewardTermCfg
+
+    from mjlab_microduck.tasks import mdp as microduck_mdp
+    from mjlab_microduck.tasks.qdd_biped_velocity_env_cfg import NUM_STEPS_PER_ENV
+
+    cfg.rewards["ankle_torque"] = RewardTermCfg(
+        func=microduck_mdp.joint_torque_sq_cost, weight=0.0, params={"joint_regex": r".*ankle_pitch"}
+    )
+    cfg.curriculum["ankle_torque_weight"] = CurriculumTermCfg(
+        func=microduck_mdp.reward_weight,
+        params={
+            "reward_name": "ankle_torque",
+            "weight_stages": [{"step": it * NUM_STEPS_PER_ENV, "weight": -w} for it, w in ANKLE_TORQUE_WEIGHT_STAGES_IT],
+        },
+    )
+
+
 def make_qdd_biped_velocity_arms_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     from mjlab_microduck.tasks.qdd_biped_velocity_env_cfg import make_qdd_biped_velocity_env_cfg
 
@@ -272,6 +300,7 @@ def make_qdd_biped_velocity_arms_env_cfg(play: bool = False) -> ManagerBasedRlEn
     _set_arm_home(cfg)
     _set_walk_legs(cfg)
     _add_arm_swing(cfg)
+    _add_ankle_torque_cost(cfg)
     return cfg
 
 
@@ -282,6 +311,7 @@ def make_qdd_biped_rough_arms_env_cfg(play: bool = False) -> ManagerBasedRlEnvCf
     _set_arm_home(cfg)
     _set_walk_legs(cfg)
     _add_arm_swing(cfg)
+    _add_ankle_torque_cost(cfg)
     return cfg
 
 

@@ -9549,6 +9549,23 @@ def skill_extra_ref_tracking(
     return torch.nan_to_num(torch.exp(-err / std**2), nan=0.0)
 
 
+def joint_torque_sq_cost(env: ManagerBasedRlEnv, joint_regex: str = r".*ankle_pitch", log_name: str = "ankle") -> torch.Tensor:
+    """COST (>= 0): sum of the squared applied torques (qfrc_actuator) of the joints
+    matching joint_regex [Nm^2]. Logs their RMS over the batch (Metrics/<log_name>_tau_rms_nm):
+    the motor heating figure the mechanical review compares to the rated torque."""
+    asset: Entity = env.scene["robot"]
+    cache = env.__dict__.setdefault("_joint_torque_sq_ids", {})
+    if joint_regex not in cache:
+        ids = [i for i, n in enumerate(asset.joint_names) if re.fullmatch(joint_regex, n)]
+        if not ids:
+            raise ValueError(f"joint_torque_sq_cost: no joint matches {joint_regex!r}")
+        cache[joint_regex] = torch.tensor(ids, device=env.device)
+    tau = asset.data.qfrc_actuator[:, cache[joint_regex]]
+    sq = torch.square(torch.nan_to_num(tau))
+    env.extras["log"][f"Metrics/{log_name}_tau_rms_nm"] = torch.sqrt(sq.mean())
+    return sq.sum(dim=1)
+
+
 def skill_residual_l2(env: ManagerBasedRlEnv, action_name: str = "joint_pos") -> torch.Tensor:
     """COST (>= 0): |a|^2 of the residual action (stay on the feed-forward unless it
     pays off)."""
