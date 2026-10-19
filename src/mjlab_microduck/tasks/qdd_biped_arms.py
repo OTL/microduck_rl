@@ -271,7 +271,9 @@ def _add_arm_swing(cfg: ManagerBasedRlEnvCfg) -> None:
 # squared ankle torques, introduced after the gait exists (penalties during skill discovery
 # make standing still win) and raised in stages. arms7 at 1.8 Nm RMS: 2 x 1.8^2 = 6.5 Nm^2 ->
 # -0.33 per step at the final weight.
-ANKLE_TORQUE_WEIGHT_STAGES_IT = ((0, 0.0), (500, 0.01), (1000, 0.03), (1500, 0.05))  # (iteration, weight)
+# The stage at 3000 is for resuming a finished 3000-iteration run (arms12_flat: 0.97 Nm mean,
+# 1.17 Nm worst env), where the step counter keeps every curriculum at its last stage.
+ANKLE_TORQUE_WEIGHT_STAGES_IT = ((0, 0.0), (500, 0.01), (1000, 0.03), (1500, 0.05), (3000, 0.1))  # (iteration, weight)
 
 
 def _add_ankle_torque_cost(cfg: ManagerBasedRlEnvCfg) -> None:
@@ -303,7 +305,9 @@ def _add_ankle_torque_cost(cfg: ManagerBasedRlEnvCfg) -> None:
 # paying while the peaks come down.
 WALK_BUS_THRESHOLD_A = 25.0
 WALK_BUS_CAP_A = 30.0
-WALK_BUS_WEIGHT_STAGES_IT = ((0, 0.0), (500, 0.0003), (1000, 0.0006), (1500, 0.001))  # (iteration, weight)
+# arms12_flat (3000 iterations, final weight 0.001) came down to 32 A median / 42 A worst env
+# (2 of 16 envs above 35 A). The stage at 3000 raises the weight for a resumed run.
+WALK_BUS_WEIGHT_STAGES_IT = ((0, 0.0), (500, 0.0003), (1000, 0.0006), (1500, 0.001), (3000, 0.003))  # (iteration, weight)
 
 
 def _add_walk_bus_cost(cfg: ManagerBasedRlEnvCfg) -> None:
