@@ -344,3 +344,16 @@ def test_jump_arm_swing_reference_and_reward():
     assert "arm_pose" not in cfg.rewards and cfg.rewards["arm_swing"].weight > 0
     io = A.build_jump_armswing_policy_io()
     assert io["task"] == A.JUMP_ARMSWING_TASK_ID and set(io["arm_swing"]["keys"]) == set(A.JUMP_ARM_SWING_KEYS)
+
+
+def test_chain_getup_limits_the_bus_current():
+    """chain2 drew 68-125 A rising from the crouch (2026-10-19): the chained get-up pays a
+    current cost and, once learned, ends episodes above a limit lowered to 32 A."""
+    from mjlab_microduck.tasks import qdd_biped_arms as A
+
+    cfg = A.make_qdd_biped_getup_chain_arms_env_cfg()
+    assert cfg.rewards["bus_current"].weight < 0
+    sched = cfg.terminations["bus_overcurrent"].params["limit_schedule"]
+    assert sched[0] == (0, float("inf")) and sched[-1][1] == 32.0
+    assert [s for s, _ in sched] == sorted(s for s, _ in sched)
+    assert "bus_overcurrent" not in A.make_qdd_biped_getup_chain_arms_env_cfg(play=True).terminations

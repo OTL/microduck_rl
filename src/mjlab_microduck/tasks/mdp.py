@@ -9614,7 +9614,7 @@ def skill_bus_current_cost(
     asset: Entity = env.scene[asset_cfg.name]
     i_bus = qdd_bus_current(env, asset, v_bus)
     term = env.action_manager.get_term(action_name)
-    if isinstance(term, SkillReferenceJointPositionAction):
+    if getattr(term, "bus_max", None) is not None:  # skill / get-up reference actions
         i_bus = torch.maximum(i_bus, term.bus_max)
     env.extras["log"]["Metrics/hop_bus_a_max"] = i_bus.max()
     return torch.nan_to_num(torch.square(torch.clamp(i_bus - threshold_a, min=0.0)), nan=0.0)
@@ -9625,15 +9625,22 @@ def skill_bus_overcurrent(
     limit_a: float = 32.0,
     skip_s: float = 0.15,
     action_name: str = "joint_pos",
+    limit_schedule: Optional[tuple] = None,
 ) -> torch.Tensor:
     """TERMINATION: the 5 ms average motor bus current (qdd_bus_current, largest over the
     physics substeps of this policy step; SkillReferenceJointPositionAction only) exceeds
     limit_a (LM5069 hot-swap: trips at 32-41 A for 4.7 ms -> the robot loses power). Not in
     the first skip_s of an episode: the spawn (dropped from a few mm, or a reference state
-    with its speeds) draws 40-100 A for a step, which the robot never sees."""
+    with its speeds) draws 40-100 A for a step, which the robot never sees.
+    limit_schedule ((env_step, limit_a), ...): the limit from each env step on (lowered in
+    stages while a motion that starts far above it learns to draw less); overrides limit_a."""
     term = env.action_manager.get_term(action_name)
-    if not isinstance(term, SkillReferenceJointPositionAction):
+    if getattr(term, "bus5_max", None) is None:
         return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    if limit_schedule:
+        step = env.common_step_counter
+        limit_a = [lim for s0, lim in limit_schedule if step >= s0][-1]
+        env.extras["log"]["Metrics/bus_limit_a"] = torch.tensor(float(limit_a))
     settled = env.episode_length_buf * env.step_dt >= skip_s
     return settled & (torch.nan_to_num(term.bus5_max) > limit_a)
 
@@ -9799,6 +9806,12 @@ class GetupReferenceJointPositionAction(_JointAction):
             self.roll_durs = f(np.maximum(rd, 1e-6))
             self.t_roll = float(self.roll_t_keys[-1])
             self.q_roll = self.q_start.clone()  # pose the roll ramps from
+        # motor bus current over the physics substeps of the policy step (skill_bus_current_cost /
+        # skill_bus_overcurrent): largest value, and largest 5 ms average
+        self.bus_max = torch.zeros(self.num_envs, device=dev)
+        self.bus5_max = torch.zeros(self.num_envs, device=dev)
+        self._bus_hist = torch.zeros(self.num_envs, max(1, round(0.005 / self._pdt)), device=dev)
+        self._bus_k = 0
 
     @staticmethod
     def _keyed(t, q_start, keys, t_keys, durs, prep):
@@ -9849,11 +9862,20 @@ class GetupReferenceJointPositionAction(_JointAction):
             q_start = torch.where(roll.unsqueeze(1), self.roll_keys[-1].expand_as(q), q_start)
         self.t[env_ids] = torch.where(standing, self.t_end, t0)
         self.q_start[env_ids] = q_start
+        self._bus_hist[env_ids] = 0.0
 
     def process_actions(self, actions: torch.Tensor):
         self._raw_actions[:] = actions
+        self.bus_max.zero_()
+        self.bus5_max.zero_()
 
     def apply_actions(self) -> None:
+        # bus current of the physics step just taken
+        i_bus = qdd_bus_current(self._env_ref, self._entity)
+        self.bus_max = torch.maximum(self.bus_max, i_bus)
+        self._bus_hist[:, self._bus_k % self._bus_hist.shape[1]] = i_bus
+        self._bus_k += 1
+        self.bus5_max = torch.maximum(self.bus5_max, self._bus_hist.mean(dim=1))
         ref = self.reference(self.t, self.q_start)
         a = torch.zeros_like(self._raw_actions) if self.zero_residual else self._raw_actions
         target = ref + a * (self._scale * self.residual_gain)

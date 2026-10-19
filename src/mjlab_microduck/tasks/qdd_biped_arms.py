@@ -490,7 +490,46 @@ def make_qdd_biped_getup_chain_arms_env_cfg(play: bool = False) -> ManagerBasedR
     cfg.rewards.pop("demo_tracking", None)
     for name in [k for k, v in cfg.curriculum.items() if v.params.get("reward_name") == "demo_tracking"]:
         cfg.curriculum.pop(name)
+    _add_getup_bus_limit(cfg, play)
     return cfg
+
+
+# Motor bus current of the get-up (electrical review 2026-10-19): the LM5069 hot-swap cuts
+# the power above 32 A (5 ms average; ~45 A if raised) and the battery sags below 16 V.
+# chain2 drew 68-76 A in the robot repo's sim_bridge and 125 A (median of the episode peaks)
+# in this training sim, the found motion alone 37 A: the peaks come from the residual.
+# Cost above GETUP_BUS_THRESHOLD_A from the start; episodes end above the limit only once
+# the get-up is learned (a cut from iteration 0 ended every episode of the smoke run, even
+# at 80 A), then lowered in stages to 32 A.
+GETUP_BUS_THRESHOLD_A = 25.0
+GETUP_BUS_WEIGHT = 0.001  # 125 A -> -10 per step, 50 A -> -0.6, 35 A -> -0.1
+GETUP_BUS_LIMIT_A = 32.0
+GETUP_BUS_LIMIT_STAGES_IT = (
+    (0, float("inf")),
+    (500, 80.0),
+    (800, 60.0),
+    (1100, 45.0),
+    (1400, GETUP_BUS_LIMIT_A),
+)  # (iteration, A)
+
+
+def _add_getup_bus_limit(cfg: ManagerBasedRlEnvCfg, play: bool) -> None:
+    from mjlab.managers.reward_manager import RewardTermCfg
+    from mjlab.managers.termination_manager import TerminationTermCfg
+
+    from mjlab_microduck.tasks import mdp as microduck_mdp
+
+    cfg.rewards["bus_current"] = RewardTermCfg(
+        func=microduck_mdp.skill_bus_current_cost,
+        weight=-GETUP_BUS_WEIGHT,
+        params={"threshold_a": GETUP_BUS_THRESHOLD_A},
+    )
+    if not play:
+        from mjlab_microduck.tasks.qdd_biped_getup_env_cfg import NUM_STEPS_PER_ENV as steps
+        cfg.terminations["bus_overcurrent"] = TerminationTermCfg(
+            func=microduck_mdp.skill_bus_overcurrent,
+            params={"limit_schedule": tuple((it * steps, a) for it, a in GETUP_BUS_LIMIT_STAGES_IT)},
+        )
 
 
 # =============================================================================
