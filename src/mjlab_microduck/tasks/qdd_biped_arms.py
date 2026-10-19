@@ -194,6 +194,40 @@ def add_arms_to_env_cfg(
     return cfg
 
 
+# Walking with straighter knees (OTL 2026-10-19: "walk with the knees bent as little as
+# possible"): the walking / rough default pose (action offset, reset pose, pose reward
+# centre) has the knee at WALK_KNEE instead of 45 deg, feet flat (hip = ankle = -knee / 2),
+# and the knee's pose kernel while walking is tighter. Torso height in that pose:
+# WALK_BASE_Z (MuJoCo, soles on the floor; 45 deg: rc.STAND_BASE_Z 0.3542).
+WALK_KNEE = 0.4  # rad (23 deg)
+WALK_BASE_Z = 0.3688
+WALK_LEG_HOME = {r".*_hip_pitch": -WALK_KNEE / 2, r".*_knee": WALK_KNEE, r".*_ankle_pitch": -WALK_KNEE / 2}
+WALK_KNEE_STD_WALKING = 0.25  # rad (the leg-only walking task: 0.4)
+
+
+def _set_walk_legs(cfg: ManagerBasedRlEnvCfg) -> None:
+    robot = cfg.scene.entities["robot"]
+    pos = (robot.init_state.pos[0], robot.init_state.pos[1], WALK_BASE_Z + (robot.init_state.pos[2] - rc.STAND_BASE_Z))
+    robot.init_state = replace(
+        robot.init_state, pos=pos, joint_pos={**dict(robot.init_state.joint_pos), **WALK_LEG_HOME}
+    )
+    pose = cfg.rewards["pose"]
+    for key in ("std_walking", "std_running"):
+        if isinstance(pose.params.get(key), dict):
+            pose.params[key] = {**pose.params[key], r".*knee.*": WALK_KNEE_STD_WALKING}
+
+
+def _walk_leg_default() -> list[float]:
+    out = []
+    for n in rc.QDD_JOINT_NAMES:
+        v = 0.0
+        for k, x in WALK_LEG_HOME.items():
+            if re.fullmatch(k, n):
+                v = x
+        out.append(v)
+    return out
+
+
 def _set_arm_home(cfg: ManagerBasedRlEnvCfg) -> None:
     """Arms' default pose (bent elbows): the action offset and the reset pose."""
     robot = cfg.scene.entities["robot"]
@@ -229,6 +263,7 @@ def make_qdd_biped_velocity_arms_env_cfg(play: bool = False) -> ManagerBasedRlEn
 
     cfg = add_arms_to_env_cfg(make_qdd_biped_velocity_env_cfg(play=play), policy_arms=True)
     _set_arm_home(cfg)
+    _set_walk_legs(cfg)
     _add_arm_swing(cfg)
     return cfg
 
@@ -238,6 +273,7 @@ def make_qdd_biped_rough_arms_env_cfg(play: bool = False) -> ManagerBasedRlEnvCf
 
     cfg = add_arms_to_env_cfg(make_qdd_biped_rough_env_cfg(play=play), policy_arms=True)
     _set_arm_home(cfg)
+    _set_walk_legs(cfg)
     _add_arm_swing(cfg)
     return cfg
 
@@ -396,7 +432,11 @@ def build_getup_arms_policy_io() -> dict:
 def build_walking_arms_policy_io(task: str = VELOCITY_ARMS_TASK_ID) -> dict:
     from mjlab_microduck.tasks.qdd_biped_velocity_env_cfg import build_policy_io
 
-    return extend_policy_io_with_arms(build_policy_io(), task, _arm_walk_default())
+    io = extend_policy_io_with_arms(build_policy_io(), task, _arm_walk_default())
+    act = io["action"]
+    act["default_joint_pos"] = _walk_leg_default() + list(act["default_joint_pos"][len(rc.QDD_JOINT_NAMES) :])
+    act["walk_knee_note"] = f"straighter knees (OTL 2026-10-19): default knee {WALK_KNEE} rad, not 45 deg"
+    return io
 
 
 def build_jump_arms_policy_io(spec: dict | None = None) -> dict:

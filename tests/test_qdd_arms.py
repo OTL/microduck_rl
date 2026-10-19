@@ -245,3 +245,19 @@ def test_getup_supine_task_cfg_and_policy_io():
     assert len(ref["keys_rad"]) == len(ref["durs_s"]) + 1 and all(len(k) == 14 for k in ref["keys_rad"])
     # the reference ends standing in the default pose
     assert np.allclose(ref["keys_rad"][-1], io["action"]["default_joint_pos"], atol=1e-5)
+
+
+def test_walking_arms_straighter_knees():
+    """OTL 2026-10-19: walking / rough with arms stand and walk with straighter knees
+    (default knee WALK_KNEE, feet flat), in the cfg and in the policy_io."""
+    from mjlab_microduck.tasks import qdd_biped_arms as A
+
+    for make in (A.make_qdd_biped_velocity_arms_env_cfg, A.make_qdd_biped_rough_arms_env_cfg):
+        cfg = make()
+        st = cfg.scene.entities["robot"].init_state
+        assert st.joint_pos[r".*_knee"] == A.WALK_KNEE
+        assert st.joint_pos[r".*_hip_pitch"] + st.joint_pos[r".*_knee"] + st.joint_pos[r".*_ankle_pitch"] == 0.0
+        assert abs(st.pos[2] - A.WALK_BASE_Z) < 0.01
+    io = A.build_walking_arms_policy_io()
+    q = dict(zip(io["action"]["joint_order"], io["action"]["default_joint_pos"]))
+    assert q["l_knee"] == q["r_knee"] == A.WALK_KNEE
