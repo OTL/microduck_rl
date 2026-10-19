@@ -43,6 +43,7 @@ from mjlab_microduck.robot import qdd_biped_constants as rc
 VELOCITY_ARMS_TASK_ID = "Mjlab-Velocity-Flat-QddBipedArms"
 ROUGH_ARMS_TASK_ID = "Mjlab-Velocity-Rough-QddBipedArms"
 JUMP_ARMS_TASK_ID = "Mjlab-Skill-Hop-QddBipedArms"
+JUMP_ARMSWING_TASK_ID = "Mjlab-Skill-Hop-ArmSwing-QddBipedArms"
 GETUP_ARMS_TASK_ID = "Mjlab-Getup-QddBipedArms"
 
 # Get-up with arms: the start mix of the leg-only get-up without the prone bridge
@@ -305,6 +306,48 @@ def make_qdd_biped_jump_arms_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg
     return cfg
 
 
+# Arm swing of the jump (OTL 2026-10-19 "use the arms more"): like a person, the arms
+# swing forward-up through the push, so their momentum adds to the take-off. Times on the
+# skill clock (hop.json: crouch to 1.0 s, hold to 1.2 s, take-off 1.293 s, touchdown
+# 1.469 s). Shoulder - = forward.
+JUMP_ARM_SWING_KEYS = {
+    # From the standing arm pose, swing forward-up through the push and back after the
+    # landing (table alone, 2 nominal runs, 2026-10-19: CoM rise 5.9 -> 7.5 cm, take-off
+    # 1.05 -> 1.14 m/s, peak bus 37 -> 46 A; a back swing while crouching first gave less
+    # rise for more current, a straight elbow too).
+    r".*_shoulder_pitch": (
+        (0.0, ARM_WALK_SHOULDER0),
+        (1.12, ARM_WALK_SHOULDER0),
+        (1.32, -1.0),  # forward-up through the push
+        (1.5, -0.5),
+        (1.85, ARM_WALK_SHOULDER0),
+    ),
+    r".*_elbow": ((0.0, ARM_WALK_ELBOW0), (1.85, ARM_WALK_ELBOW0)),
+}
+JUMP_ARM_SWING_STD = 0.5  # rad: a guide, the policy may change the swing
+JUMP_ARM_SWING_WEIGHT = 1.0
+
+
+def make_qdd_biped_jump_armswing_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+    """The jump with arms, the arms swinging with the jump: the arm targets follow
+    JUMP_ARM_SWING_KEYS (feed-forward in the reference action, the policy adds a residual)
+    and a tracking reward replaces the hold-the-pose arm_pose term."""
+    from mjlab.managers.reward_manager import RewardTermCfg
+
+    from mjlab_microduck.tasks import mdp as microduck_mdp
+
+    cfg = make_qdd_biped_jump_arms_env_cfg(play=play)
+    act = cfg.actions["joint_pos"]
+    act.extra_keys = dict(JUMP_ARM_SWING_KEYS)
+    del cfg.rewards["arm_pose"]
+    cfg.rewards["arm_swing"] = RewardTermCfg(
+        func=microduck_mdp.skill_extra_ref_tracking,
+        weight=JUMP_ARM_SWING_WEIGHT,
+        params={"std": JUMP_ARM_SWING_STD, "joint_names": tuple(rc.QDD_ARM_JOINT_NAMES)},
+    )
+    return cfg
+
+
 GETUP_REF_PHYSICS_DT = 0.002  # the found motions were searched at 2 ms
 
 
@@ -531,6 +574,21 @@ def build_jump_arms_policy_io(spec: dict | None = None) -> dict:
     return io
 
 
+def build_jump_armswing_policy_io(spec: dict | None = None) -> dict:
+    """The jump-with-arms contract + the arm swing feed-forward (arm target = keyed swing
+    + residual)."""
+    io = build_jump_arms_policy_io(spec)
+    io["task"] = JUMP_ARMSWING_TASK_ID
+    io["arm_swing"] = {
+        "keys": {pat: [[t, q] for t, q in keys] for pat, keys in JUMP_ARM_SWING_KEYS.items()},
+        "rule": "t = skill time [s]; the arm joint matching each regex: smoothstep from key to key "
+        "(zero speed at every key), the first key before, the last after; velocity target = its "
+        "derivative; position target = this + action_scale * residual_scale(t) * action (like the "
+        "leg table)",
+    }
+    return io
+
+
 def arms_policy_io_onnx_metadata(task: str, spec: dict | None = None) -> dict[str, str]:
     """ONNX metadata for the walking / rough / jump policies with arms (generated,
     not a committed file: the leg-only contract + the arms)."""
@@ -538,6 +596,8 @@ def arms_policy_io_onnx_metadata(task: str, spec: dict | None = None) -> dict[st
 
     if task == JUMP_ARMS_TASK_ID:
         io = build_jump_arms_policy_io(spec)
+    elif task == JUMP_ARMSWING_TASK_ID:
+        io = build_jump_armswing_policy_io(spec)
     else:
         io = build_walking_arms_policy_io(task)
     text = json.dumps(io, indent=2) + "\n"

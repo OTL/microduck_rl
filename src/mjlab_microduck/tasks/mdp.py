@@ -1,6 +1,7 @@
 """MDP functions for microduck tasks"""
 
 import math
+import re
 import os
 from dataclasses import dataclass as _dataclass
 
@@ -9427,8 +9428,19 @@ class SkillReferenceJointPositionAction(_JointAction):
             out[:, known] = qdd_skill.sample_table(table, t, key)[:, order]
             return out
 
-        self.ref_q = f(full("q", default))
-        self.ref_dq = f(full("dq", np.zeros(len(names))))
+        ref_q = full("q", default)
+        ref_dq = full("dq", np.zeros(len(names)))
+        # joints outside the table with keyed targets (the arm swing of a jump): smoothstep
+        # from key to key (zero speed at every key), the velocity target its derivative
+        for pat, keys in (cfg.extra_keys or {}).items():
+            cols = [k for k, nm in enumerate(names) if k not in known and re.fullmatch(pat, nm)]
+            if not cols:
+                raise ValueError(f"extra_keys: {pat!r} matches no joint outside the reference table")
+            kq, kdq = smoothstep_keys(keys, t)
+            ref_q[:, cols] = kq[:, None]
+            ref_dq[:, cols] = kdq[:, None]
+        self.ref_q = f(ref_q)
+        self.ref_dq = f(ref_dq)
         self.ref_tau = f(full("tau_ff", np.zeros(len(names))))
         self.ref_res = f(qdd_skill.sample_table(table, t, "residual_scale"))
         if table.get("residual_scale_joints") is not None:
@@ -9486,9 +9498,55 @@ class SkillReferenceJointPositionActionCfg(_JointPositionActionCfgBase):
     command_name: str = "skill"
     residual_gain: float = 1.0  # global multiplier on the residual (curriculum)
     zero_residual: bool = False  # play the table alone (validation)
+    # joint-name regex -> ((t_s, q_rad), ...): keyed targets for joints the table does not
+    # have (arm swing); None = those joints rest at the default pose
+    extra_keys: Optional[dict] = None
 
     def build(self, env: ManagerBasedRlEnv) -> SkillReferenceJointPositionAction:
         return SkillReferenceJointPositionAction(self, env)
+
+
+def smoothstep_keys(keys, t: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Target and its time derivative at times t for keys ((t_s, q), ...) (t_s increasing):
+    smoothstep from each key to the next (zero speed at every key), the first key before
+    it, the last after it."""
+    kt = np.asarray([k[0] for k in keys], dtype=np.float64)
+    kq = np.asarray([k[1] for k in keys], dtype=np.float64)
+    if len(kt) == 0 or np.any(np.diff(kt) <= 0):
+        raise ValueError("keys need increasing times")
+    q = np.full(len(t), kq[-1])
+    dq = np.zeros(len(t))
+    q[t <= kt[0]] = kq[0]
+    for j in range(len(kt) - 1):
+        m = (t > kt[j]) & (t <= kt[j + 1])
+        d = kt[j + 1] - kt[j]
+        u = (t[m] - kt[j]) / d
+        q[m] = kq[j] + (kq[j + 1] - kq[j]) * u * u * (3.0 - 2.0 * u)
+        dq[m] = (kq[j + 1] - kq[j]) * 6.0 * u * (1.0 - u) / d
+    return q, dq
+
+
+def skill_extra_ref_tracking(
+    env: ManagerBasedRlEnv, std: float, joint_names: tuple, action_name: str = "joint_pos"
+) -> torch.Tensor:
+    """REWARD in [0, 1]: exp(-mean_j (q_j - q_ref_j)^2 / std^2) over joints with keyed
+    targets in the reference action (extra_keys, e.g. the arm swing), at the end of this
+    policy step."""
+    term = env.action_manager.get_term(action_name)
+    asset = term._entity
+    cache = env.__dict__.setdefault("_skill_extra_ref_ids", {})
+    key = (action_name, tuple(joint_names))
+    if key not in cache:
+        names = list(term._target_names)
+        cols = [names.index(n) for n in joint_names]
+        jids = term._target_ids[cols] if isinstance(term._target_ids, torch.Tensor) else [term._target_ids[c] for c in cols]
+        cache[key] = (torch.tensor(cols, device=env.device), torch.as_tensor(jids, device=env.device))
+    cols, jids = cache[key]
+    i = torch.clamp(term._index() - 1, 0, term._n_sub - 1)
+    ref = term.ref_q[i][:, cols]
+    err = torch.mean(torch.square(asset.data.joint_pos[:, jids] - ref), dim=1)
+    env.extras["log"]["Metrics/skill_arm_rmse_deg"] = torch.rad2deg(torch.sqrt(torch.nan_to_num(err).mean()))
+    return torch.nan_to_num(torch.exp(-err / std**2), nan=0.0)
 
 
 def skill_residual_l2(env: ManagerBasedRlEnv, action_name: str = "joint_pos") -> torch.Tensor:

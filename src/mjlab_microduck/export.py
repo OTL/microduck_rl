@@ -268,7 +268,7 @@ def run_export(task_id: str, cfg: ExportConfig) -> ExportResult:
         from mjlab_microduck.tasks.qdd_biped_arms import arms_policy_io_onnx_metadata
 
         metadata.update(arms_policy_io_onnx_metadata(task_id))
-    elif task_id == "Mjlab-Skill-Hop-QddBipedArms":
+    elif task_id in ("Mjlab-Skill-Hop-QddBipedArms", "Mjlab-Skill-Hop-ArmSwing-QddBipedArms"):
         from mjlab_microduck.tasks.qdd_biped_arms import arms_policy_io_onnx_metadata
 
         skill = runner.env.unwrapped.command_manager.get_term("skill")

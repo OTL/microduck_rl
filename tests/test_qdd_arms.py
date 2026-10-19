@@ -315,3 +315,32 @@ def test_getup_residual_tasks_run_like_the_search():
         assert all(a.delay_max_lag * cfg.sim.mujoco.timestep <= 0.0101 for a in acts)
     # the from-scratch get-up keeps its 5 ms physics
     assert A.make_qdd_biped_getup_arms_env_cfg().sim.mujoco.timestep == 0.005
+
+
+def test_jump_arm_swing_reference_and_reward():
+    """The arm-swing jump (OTL 2026-10-19): arm targets follow the keyed swing (forward =
+    shoulder -) during the push, rest at the standing arm pose before and after, and a
+    tracking reward replaces the hold-the-pose term."""
+    import numpy as np
+
+    from mjlab_microduck.tasks import mdp as M
+    from mjlab_microduck.tasks import qdd_biped_arms as A
+
+    keys = A.JUMP_ARM_SWING_KEYS[r".*_shoulder_pitch"]
+    t = np.array([0.0, 1.0, 1.32, 1.5, 2.6])
+    q, dq = M.smoothstep_keys(keys, t)
+    assert q[0] == pytest.approx(A.ARM_WALK_SHOULDER0) and q[1] == pytest.approx(A.ARM_WALK_SHOULDER0)
+    assert q[2] < -0.5  # forward at take-off
+    assert q[-1] == pytest.approx(A.ARM_WALK_SHOULDER0) and dq[-1] == 0.0
+    # derivative of the smoothstep matches finite differences
+    tt = np.linspace(1.13, 1.31, 50)
+    qq, dd = M.smoothstep_keys(keys, tt)
+    assert np.allclose(np.gradient(qq, tt)[2:-2], dd[2:-2], rtol=0.05, atol=0.05)
+    with pytest.raises(ValueError):
+        M.smoothstep_keys(((1.0, 0.0), (0.5, 1.0)), tt)
+
+    cfg = A.make_qdd_biped_jump_armswing_env_cfg()
+    assert cfg.actions["joint_pos"].extra_keys == A.JUMP_ARM_SWING_KEYS
+    assert "arm_pose" not in cfg.rewards and cfg.rewards["arm_swing"].weight > 0
+    io = A.build_jump_armswing_policy_io()
+    assert io["task"] == A.JUMP_ARMSWING_TASK_ID and set(io["arm_swing"]["keys"]) == set(A.JUMP_ARM_SWING_KEYS)

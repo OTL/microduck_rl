@@ -495,6 +495,7 @@ register_mjlab_task(
 from .qdd_biped_arms import (
     GETUP_ARMS_TASK_ID as _QDD_GETUP_ARMS_TASK_ID,
     JUMP_ARMS_TASK_ID as _QDD_JUMP_ARMS_TASK_ID,
+    JUMP_ARMSWING_TASK_ID as _QDD_JUMP_ARMSWING_TASK_ID,
     ROUGH_ARMS_TASK_ID as _QDD_ROUGH_ARMS_TASK_ID,
     VELOCITY_ARMS_TASK_ID as _QDD_VELOCITY_ARMS_TASK_ID,
     arms_policy_io_onnx_metadata as _qdd_arms_policy_io_onnx_metadata,
@@ -508,6 +509,7 @@ from .qdd_biped_arms import (
     make_qdd_biped_getup_chain_arms_env_cfg,
     make_qdd_biped_getup_arms_env_cfg,
     make_qdd_biped_jump_arms_env_cfg,
+    make_qdd_biped_jump_armswing_env_cfg,
     make_qdd_biped_rough_arms_env_cfg,
     make_qdd_biped_velocity_arms_env_cfg,
 )
@@ -564,9 +566,14 @@ class QddSkillArmsOnPolicyRunner(MicroduckOnPolicyRunner):
     def save(self, path: str, infos=None):
         super().save(path, infos)
         spec = self.env.unwrapped.command_manager.get_term("skill").spec
-        _attach_onnx_metadata(
-            self, path, lambda: _qdd_arms_policy_io_onnx_metadata(_QDD_JUMP_ARMS_TASK_ID, spec), "policy_io (arms)"
-        )
+        task = getattr(self, "_jump_task", _QDD_JUMP_ARMS_TASK_ID)
+        _attach_onnx_metadata(self, path, lambda: _qdd_arms_policy_io_onnx_metadata(task, spec), "policy_io (arms)")
+
+
+class QddSkillArmSwingOnPolicyRunner(QddSkillArmsOnPolicyRunner):
+    """The jump with the arm swing (its own policy_io: arm_swing keys)."""
+
+    _jump_task = _QDD_JUMP_ARMSWING_TASK_ID
 
 
 class QddBipedGetupArmsOnPolicyRunner(MicroduckOnPolicyRunner):
@@ -627,6 +634,13 @@ register_mjlab_task(
     play_env_cfg=make_qdd_biped_jump_arms_env_cfg(play=True),
     rl_cfg=_arms_rl(QddJumpRlCfg, experiment_name="qdd_jump_arms", run_name="qdd_jump_arms"),
     runner_cls=QddSkillArmsOnPolicyRunner,
+)
+register_mjlab_task(
+    task_id=_QDD_JUMP_ARMSWING_TASK_ID,
+    env_cfg=make_qdd_biped_jump_armswing_env_cfg(),
+    play_env_cfg=make_qdd_biped_jump_armswing_env_cfg(play=True),
+    rl_cfg=_arms_rl(QddJumpRlCfg, experiment_name="qdd_jump_armswing", run_name="qdd_jump_armswing"),
+    runner_cls=QddSkillArmSwingOnPolicyRunner,
 )
 register_mjlab_task(
     task_id=_QDD_GETUP_ARMS_TASK_ID,
