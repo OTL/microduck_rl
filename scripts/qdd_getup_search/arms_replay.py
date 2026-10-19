@@ -51,6 +51,7 @@ def rollout(m, S, x, q0_state, rec=False, speed_limit=True):
     vmax = np.array(G.vmax_list(a.elbow, getattr(a, "cad", False)))
     peak = np.zeros_like(vmax)
     spin = 0.0
+    pitch_over = 0.0
     for p, q, du in segs + [(allk[-1], allk[-1], a.hold)]:
         n = round(du / G.DT)
         for i in range(n):
@@ -64,11 +65,14 @@ def rollout(m, S, x, q0_state, rec=False, speed_limit=True):
             mujoco.mj_step(m, d)
             peak = np.maximum(peak, np.abs(d.qvel[6:]) / vmax)
             spin = max(spin, float(np.linalg.norm(d.qvel[3:6])))
+            pitch_over = max(pitch_over, abs(float(d.xmat[1][8])))
             if rec and i % 10 == 0:
                 frames.append(d.qpos.copy())
     up, z = d.xmat[1][8], d.qpos[2]
     if getattr(a, "goal", "stand") == "supine":  # rolled onto the back, at rest
         ok = d.xmat[1][6] > 0.8 and np.linalg.norm(d.qvel[:6]) < 0.3
+        if getattr(a, "roll", "any") == "side":
+            ok = ok and pitch_over < G.SIDE_ROLL_MAX_UP
     else:
         ok = up > 0.9 and abs(z - G.rc.STAND_BASE_Z) < 0.03
     return ok, (frames if rec else np.r_[peak, spin])

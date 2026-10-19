@@ -214,6 +214,12 @@ def torque_limits(qd, eff, vmax):
     return lo, up
 
 
+# --roll side: the torso z axis (head to feet) may tilt out of the floor plane only this
+# much (|z . world z|) for the roll to count; the cost starts above SIDE_ROLL_FREE_UP.
+SIDE_ROLL_MAX_UP = 0.6
+SIDE_ROLL_FREE_UP = 0.4
+
+
 def vmax_list(elbow: bool, cad: bool = False) -> list[float]:
     sh = VMAX_ELBOW if cad else VMAX_SHOULDER  # --cad: GIM3510-8 on the shoulder too
     arm = [sh, VMAX_ELBOW] if elbow else [sh]
@@ -354,6 +360,7 @@ class Search:
         n = int(T / DT)
         prog = torch.zeros(W, device=self.dev)
         prog_roll = torch.full((W,), -1.0, device=self.dev)  # best torso-front-up on the way
+        pitch_over = torch.zeros(W, device=self.dev)  # largest |torso z axis . world z| (somersault)
         spin = torch.zeros(W, device=self.dev)  # peak torso angular speed
         rows = []
         ar = torch.arange(W, device=self.dev)
@@ -387,6 +394,7 @@ class Search:
                     prog, up * torch.clamp(d.qpos[:, 2] / rc.STAND_BASE_Z, max=1.0)
                 )
                 prog_roll = torch.maximum(prog_roll, d.xmat[:, 1, 2, 0])
+                pitch_over = torch.maximum(pitch_over, d.xmat[:, 1, 2, 2].abs())
                 if record is not None and i % 10 == 0:
                     rows.append(d.qpos[record].cpu().numpy().copy())
         up = d.xmat[:, 1, 2, 2]
@@ -398,9 +406,15 @@ class Search:
             front_up = d.xmat[:, 1, 2, 0]
             rest = d.qvel[:, :6].norm(dim=1)
             ok = (front_up > 0.8) & (rest < 0.3) & ~bad
+            side = getattr(a, "roll", "any") == "side"
+            if side:
+                # OTL 2026-10-19: roll sideways (about the torso's long axis), not a
+                # somersault: the torso z axis (head-to-feet) stays near horizontal
+                ok = ok & (pitch_over < SIDE_ROLL_MAX_UP)
             s = (
                 front_up
                 + prog_roll
+                - (4.0 * torch.clamp(pitch_over - SIDE_ROLL_FREE_UP, min=0) if side else 0.0)
                 - 0.5 * rest.clamp(max=6)
                 - a.spin_w * torch.clamp(spin - a.spin_free, min=0)
                 + 2 * ok.float()
@@ -479,6 +493,12 @@ def main():
         default="stand",
         choices=("stand", "supine"),
         help="stand up, or roll over onto the back (from --face prone)",
+    )
+    ap.add_argument(
+        "--roll",
+        default="any",
+        choices=("any", "side"),
+        help="--goal supine: side = roll sideways about the torso's long axis, no somersault",
     )
     ap.add_argument(
         "--cad", action="store_true", help="the CAD v2 arm of the training model (sets --arm-len 0.25 --elbow)"
