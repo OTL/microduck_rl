@@ -313,7 +313,13 @@ WALK_BUS_WEIGHT_STAGES_IT = ((0, 0.0), (500, 0.0003), (1000, 0.0006), (1500, 0.0
 # terrain (0.01-0.02 m/s for 0.3 commanded): on steps the current peaks are hard to avoid,
 # so the capped cost (0.003 x 30^2 = -2.7 per step) outweighed the speed tracking. Rough
 # keeps the bus weight at 0.001 (at most -0.9 per step) and raises only the ankle cost.
-ROUGH_BUS_WEIGHT_STAGES_IT = WALK_BUS_WEIGHT_STAGES_IT[:-1]
+ROUGH_BUS_WEIGHT_STAGES_IT = WALK_BUS_WEIGHT_STAGES_IT[:-1] + ((4000, 0.0015),)
+# arms12/14_rough (bus cost above 25 A) still drew 43-57 A median / 110-130 A peaks on rough
+# ground at 0.3 m/s, mostly short spikes when a foot catches an edge. From 4000 iterations (a
+# resumed arms14_rough) the cost only counts the part above ROUGH_BUS_THRESHOLD_A, the limit
+# itself, so the ordinary gait is free and only the spikes pay (cap 30 A over: at most -1.35).
+ROUGH_BUS_THRESHOLD_A = 35.0
+ROUGH_BUS_THRESHOLD_FROM_IT = 4000
 ROUGH_ANKLE_TORQUE_WEIGHT_STAGES_IT = ANKLE_TORQUE_WEIGHT_STAGES_IT[:-1] + ((3000, 0.07),)
 
 
@@ -359,6 +365,22 @@ def make_qdd_biped_rough_arms_env_cfg(play: bool = False) -> ManagerBasedRlEnvCf
     _add_arm_swing(cfg)
     _add_ankle_torque_cost(cfg, ROUGH_ANKLE_TORQUE_WEIGHT_STAGES_IT)
     _add_walk_bus_cost(cfg, ROUGH_BUS_WEIGHT_STAGES_IT)
+    from mjlab.managers.curriculum_manager import CurriculumTermCfg
+
+    from mjlab_microduck.tasks import mdp as microduck_mdp
+    from mjlab_microduck.tasks.qdd_biped_velocity_env_cfg import NUM_STEPS_PER_ENV
+
+    cfg.curriculum["bus_current_threshold"] = CurriculumTermCfg(
+        func=microduck_mdp.reward_param_stages,
+        params={
+            "reward_name": "bus_current",
+            "param": "threshold_a",
+            "stages": [
+                {"step": 0, "value": WALK_BUS_THRESHOLD_A},
+                {"step": ROUGH_BUS_THRESHOLD_FROM_IT * NUM_STEPS_PER_ENV, "value": ROUGH_BUS_THRESHOLD_A},
+            ],
+        },
+    )
     return cfg
 
 

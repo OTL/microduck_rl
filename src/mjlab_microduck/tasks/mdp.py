@@ -3605,6 +3605,24 @@ def reward_weight(
     return torch.tensor([term_cfg.weight])
 
 
+def reward_param_stages(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    reward_name: str,
+    param: str,
+    stages: list[dict],
+) -> torch.Tensor:
+    """Step-staged reward PARAMETER curriculum (like reward_weight, for one entry of the
+    term's params): ``stages`` is a list of ``{"step": int, "value": float}``; the value of
+    the latest elapsed stage is written to the live RewardManager term cfg."""
+    del env_ids
+    term_cfg = env.reward_manager.get_term_cfg(reward_name)
+    for stage in stages:
+        if env.common_step_counter >= stage["step"]:
+            term_cfg.params[param] = stage["value"]
+    return torch.tensor([float(term_cfg.params[param])])
+
+
 def com_range_curriculum(
     env: ManagerBasedRlEnv,
     env_ids: torch.Tensor,
