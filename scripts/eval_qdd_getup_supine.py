@@ -62,7 +62,8 @@ def run(onnx_path: str, kind: str, n_envs: int, play: bool, seed: int, chain: bo
             act = torch.zeros(n_envs, env.action_manager.total_action_dim)
         else:
             x = obs["actor"].numpy().astype(np.float32)
-            act = torch.tensor(sess.run(None, {sess.get_inputs()[0].name: x})[0])
+            name = sess.get_inputs()[0].name  # exported with batch 1: one row at a time
+            act = torch.tensor(np.concatenate([sess.run(None, {name: x[i : i + 1]})[0] for i in range(len(x))]))
         obs, *_ = env.step(act)
     up = microduck_mdp.qdd_torso_up(env)
     z = microduck_mdp.qdd_root_height(env)
