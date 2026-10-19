@@ -9651,14 +9651,55 @@ def qdd_bus_current(env: ManagerBasedRlEnv, asset: Entity, v_bus: float = 22.0) 
     return torch.nan_to_num(torch.where(ankle, pank, p6010).sum(dim=1) / v)
 
 
+class BusTrackingJointPositionAction(_JointAction):
+    """mjlab's joint position action that also records the motor bus current over the
+    physics substeps of each policy step (bus_max, and the largest 5 ms average bus5_max)
+    for skill_bus_current_cost: the end of the policy step alone samples 1 of the substeps
+    and misses the short peaks (foot strikes)."""
+
+    def __init__(self, cfg, env: ManagerBasedRlEnv):
+        super().__init__(cfg, env)
+        self._env_ref = env
+        dev = self.device
+        self.bus_max = torch.zeros(self.num_envs, device=dev)
+        self.bus5_max = torch.zeros(self.num_envs, device=dev)
+        self._bus_hist = torch.zeros(self.num_envs, max(1, round(0.005 / env.physics_dt)), device=dev)
+        self._bus_k = 0
+
+    def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
+        super().reset(env_ids)
+        self._bus_hist[env_ids if env_ids is not None else slice(None)] = 0.0
+
+    def process_actions(self, actions: torch.Tensor):
+        super().process_actions(actions)
+        self.bus_max.zero_()
+        self.bus5_max.zero_()
+
+    def apply_actions(self) -> None:
+        i_bus = qdd_bus_current(self._env_ref, self._entity)
+        self.bus_max = torch.maximum(self.bus_max, i_bus)
+        self._bus_hist[:, self._bus_k % self._bus_hist.shape[1]] = i_bus
+        self._bus_k += 1
+        self.bus5_max = torch.maximum(self.bus5_max, self._bus_hist.mean(dim=1))
+        super().apply_actions()
+
+
+@_dataclass(kw_only=True)
+class BusTrackingJointPositionActionCfg(_JointPositionActionCfgBase):
+    def build(self, env: ManagerBasedRlEnv) -> BusTrackingJointPositionAction:
+        return BusTrackingJointPositionAction(self, env)
+
+
 def skill_bus_current_cost(
     env: ManagerBasedRlEnv,
     threshold_a: float = 20.0,
     v_bus: float = 22.0,
     action_name: str = "joint_pos",
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    cap_a: float | None = None,
 ) -> torch.Tensor:
-    """COST (>= 0): relu(I_bus - threshold)^2 [A^2], I_bus = motor bus current
+    """COST (>= 0): relu(I_bus - threshold)^2 [A^2] (the excess clipped at cap_a if given:
+    a bounded cost, so a gait that cannot avoid the peaks yet does not learn to stand still), I_bus = motor bus current
     (qdd_bus_current), the largest over the physics substeps of this policy step when the
     action is SkillReferenceJointPositionAction (it records every substep; the policy step
     alone samples 1 of 4 and missed the short peaks), else at the end of the step. The
@@ -9669,7 +9710,11 @@ def skill_bus_current_cost(
     if getattr(term, "bus_max", None) is not None:  # skill / get-up reference actions
         i_bus = torch.maximum(i_bus, term.bus_max)
     env.extras["log"]["Metrics/hop_bus_a_max"] = i_bus.max()
-    return torch.nan_to_num(torch.square(torch.clamp(i_bus - threshold_a, min=0.0)), nan=0.0)
+    env.extras["log"]["Metrics/bus_a_mean_peak"] = i_bus.mean()
+    ex = torch.clamp(i_bus - threshold_a, min=0.0)
+    if cap_a is not None:
+        ex = torch.clamp(ex, max=cap_a)
+    return torch.nan_to_num(torch.square(ex), nan=0.0)
 
 
 def skill_bus_overcurrent(

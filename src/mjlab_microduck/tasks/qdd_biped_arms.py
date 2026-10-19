@@ -296,10 +296,14 @@ def _add_ankle_torque_cost(cfg: ManagerBasedRlEnvCfg) -> None:
 # Motor bus current of walking (goal 2026-10-19: every skill within the power limits):
 # arms7 at 0.3 m/s flat drew 5 ms peaks of 38 A (median env) to 46 A with domain
 # randomisation (scripts/eval_qdd_constraints.py), past the ~35 A the battery sag allows
-# (LM5069 cut at 48.5 A minimum). Cost above WALK_BUS_THRESHOLD_A on the current at the end
-# of each policy step, staged with the ankle cost (both buy heat / sag with gait effort).
+# (LM5069 cut at 48.5 A minimum); rough 72-141 A. Cost above WALK_BUS_THRESHOLD_A on the
+# largest current over the physics substeps (mdp.BusTrackingJointPositionAction), staged
+# with the ankle cost (both buy heat / sag with gait effort). The excess is clipped at
+# WALK_BUS_CAP_A: at most -0.9 per step, below the speed tracking reward, so walking keeps
+# paying while the peaks come down.
 WALK_BUS_THRESHOLD_A = 25.0
-WALK_BUS_WEIGHT_STAGES_IT = ((0, 0.0), (500, 0.0005), (1000, 0.001), (1500, 0.002))  # (iteration, weight)
+WALK_BUS_CAP_A = 30.0
+WALK_BUS_WEIGHT_STAGES_IT = ((0, 0.0), (500, 0.0003), (1000, 0.0006), (1500, 0.001))  # (iteration, weight)
 
 
 def _add_walk_bus_cost(cfg: ManagerBasedRlEnvCfg) -> None:
@@ -309,8 +313,10 @@ def _add_walk_bus_cost(cfg: ManagerBasedRlEnvCfg) -> None:
     from mjlab_microduck.tasks import mdp as microduck_mdp
     from mjlab_microduck.tasks.qdd_biped_velocity_env_cfg import NUM_STEPS_PER_ENV
 
+    old = cfg.actions["joint_pos"]
+    cfg.actions["joint_pos"] = microduck_mdp.BusTrackingJointPositionActionCfg(**vars(old))
     cfg.rewards["bus_current"] = RewardTermCfg(
-        func=microduck_mdp.skill_bus_current_cost, weight=0.0, params={"threshold_a": WALK_BUS_THRESHOLD_A}
+        func=microduck_mdp.skill_bus_current_cost, weight=0.0, params={"threshold_a": WALK_BUS_THRESHOLD_A, "cap_a": WALK_BUS_CAP_A}
     )
     cfg.curriculum["bus_current_weight"] = CurriculumTermCfg(
         func=microduck_mdp.reward_weight,
