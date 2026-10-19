@@ -16,8 +16,8 @@ def test_arms_model_joints_and_mass():
     base = rc.get_qdd_biped_spec().compile().body_subtreemass[1]
     added = m.body_subtreemass[1] - base
     per_arm = 2 * rc.ARM_MOTOR["mass"] + rc.ARM_UPPER_MASS + rc.ARM_FORE_MASS + rc.ARM_SHOULDER_MOUNT_MASS
-    assert abs(added - 2 * per_arm) < 1e-6  # CAD v2: about 0.74 kg per arm
-    assert abs(per_arm - 0.743) < 0.01
+    assert abs(added - 2 * per_arm) < 1e-6  # reinforced CAD (robo #65): about 0.78 kg per arm
+    assert abs(per_arm - 0.784) < 0.01
     for n in ("l_shoulder_pitch", "r_shoulder_pitch"):
         assert tuple(m.joint(n).range) == pytest.approx(rc.ARM_SHOULDER_RANGE)
     # arm links are collision shapes (falls, self-collision)
@@ -348,13 +348,14 @@ def test_jump_arm_swing_reference_and_reward():
 
 def test_chain_getup_limits_the_bus_current():
     """chain2 drew 68-125 A rising from the crouch (2026-10-19): the chained get-up pays a
-    current cost and, once learned, ends episodes above a limit lowered to 32 A."""
+    current cost and, once learned, ends episodes above a limit lowered to 45 A (32 A broke
+    the roll from prone in chain3)."""
     from mjlab_microduck.tasks import qdd_biped_arms as A
 
     cfg = A.make_qdd_biped_getup_chain_arms_env_cfg()
     assert cfg.rewards["bus_current"].weight < 0
     sched = cfg.terminations["bus_overcurrent"].params["limit_schedule"]
-    assert sched[0] == (0, float("inf")) and sched[-1][1] == 32.0
+    assert sched[0] == (0, float("inf")) and sched[-1][1] == 45.0
     assert [s for s, _ in sched] == sorted(s for s, _ in sched)
     assert "bus_overcurrent" not in A.make_qdd_biped_getup_chain_arms_env_cfg(play=True).terminations
 

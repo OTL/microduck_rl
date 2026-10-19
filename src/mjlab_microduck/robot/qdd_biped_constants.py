@@ -325,18 +325,20 @@ ARM_SHOULDER_POS = (0.0, 0.103, 0.112)  # torso frame (+y = left), outside the s
 # 175.5-181.5, TPU hand pad at the tip. Printed parts + wiring: upper arm 95 g
 # (with the shoulder cover) + 15 g wiring, forearm 41 g + pad 6 g + 15 g wiring;
 # the 51 g shoulder mount is fixed to the torso. 0.74 kg per arm with the motors.
+# Reinforced (robo PR #65, 2026-10-20, arm-strength check of the get-up loads): box-section
+# upper arm 126 g with wiring, shoulder mount 76 g -> 0.78 kg per arm.
 ARM_LENGTH = 0.25  # shoulder axis -> hand tip (pad included)
 ARM_UPPER = 0.10  # shoulder -> elbow
 ARM_UPPER_Y = 0.042  # upper-arm plate centre (y 145 mm) from the shoulder (y 103)
 ARM_FORE_Y = 0.0755  # forearm plate centre (y 178.5 mm)
 ARM_LINK_Y = ARM_UPPER_Y  # (kept for older callers)
 ARM_LINK_RADIUS = 0.014
-ARM_UPPER_MASS = 0.110
+ARM_UPPER_MASS = 0.126
 ARM_FORE_MASS = 0.062
 ARM_LINK_MASS = (ARM_UPPER_MASS + ARM_FORE_MASS) / 2
 ARM_SHOULDER_MOTOR_Y = (-0.018, 0.035)  # y 85-138 mm, from the shoulder
 ARM_ELBOW_MOTOR_Y = (0.0155, 0.0685)  # y 118.5-171.5 mm
-ARM_SHOULDER_MOUNT_MASS = 0.051  # on the torso
+ARM_SHOULDER_MOUNT_MASS = 0.076  # on the torso
 ARM_SHOULDER_RANGE = (-3.3, 2.2)  # rad; - forward
 ARM_ELBOW_RANGE = (0.0, 2.36)  # rad; + bends the forearm forward
 ARM_MOTOR = dict(mass=0.26, radius=0.023, half_len=0.0265, armature=1.0e-5 * 8**2)  # GIM3510-8

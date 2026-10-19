@@ -562,21 +562,24 @@ def make_qdd_biped_getup_chain_arms_env_cfg(play: bool = False) -> ManagerBasedR
 
 
 # Motor bus current of the get-up (electrical review 2026-10-19): the LM5069 hot-swap cuts
-# the power above 32 A (5 ms average; ~45 A if raised) and the battery sags below 16 V.
+# the power above 48.5 A minimum (5 ms average, robo PR #49) and the battery sags below 16 V.
 # chain2 drew 68-76 A in the robot repo's sim_bridge and 125 A (median of the episode peaks)
 # in this training sim, the found motion alone 37 A: the peaks come from the residual.
 # Cost above GETUP_BUS_THRESHOLD_A from the start; episodes end above the limit only once
 # the get-up is learned (a cut from iteration 0 ended every episode of the smoke run, even
-# at 80 A), then lowered in stages to 32 A.
+# at 80 A), then lowered in stages to 45 A.
 GETUP_BUS_THRESHOLD_A = 25.0
 GETUP_BUS_WEIGHT = 0.001  # 125 A -> -10 per step, 50 A -> -0.6, 35 A -> -0.1
-GETUP_BUS_LIMIT_A = 32.0
+# chain3 (limit down to 32 A): stood from 98% of the prone falls at iteration 864, 0% at 2000,
+# with 5.5 overcurrent ends per episode batch: the roll onto the back did not fit under 32 A.
+# The electrical review allows up to 45 A in training (LM5069 cuts at 48.5 A minimum since
+# robo PR #49); the cost above 25 A keeps pushing the current lower.
+GETUP_BUS_LIMIT_A = 45.0
 GETUP_BUS_LIMIT_STAGES_IT = (
     (0, float("inf")),
     (500, 80.0),
     (800, 60.0),
-    (1100, 45.0),
-    (1400, GETUP_BUS_LIMIT_A),
+    (1100, GETUP_BUS_LIMIT_A),
 )  # (iteration, A)
 
 
