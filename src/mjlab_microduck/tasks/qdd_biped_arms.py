@@ -521,6 +521,7 @@ def make_qdd_biped_getup_chain_arms_env_cfg(play: bool = False) -> ManagerBasedR
     for name in [k for k, v in cfg.curriculum.items() if v.params.get("reward_name") == "demo_tracking"]:
         cfg.curriculum.pop(name)
     _add_getup_bus_limit(cfg, play)
+    _add_arm_moment_cost(cfg)
     return cfg
 
 
@@ -560,6 +561,44 @@ def _add_getup_bus_limit(cfg: ManagerBasedRlEnvCfg, play: bool) -> None:
             func=microduck_mdp.skill_bus_overcurrent,
             params={"limit_schedule": tuple((it * steps, a) for it, a in GETUP_BUS_LIMIT_STAGES_IT)},
         )
+
+
+# Arm load of the get-up (arm-strength check 2026-10-19): with chain2/3 the shoulder saw
+# out-of-plane bending of 55-73 Nm (p99 7 Nm) and the elbow 29-38 Nm when an arm got trapped
+# under the falling / rolling body; the printed shoulder mount holds well under that (SF 0.4
+# at 80 N on the hand) and the motor bearing probably too. Torque sensors at both arm joints
+# of each arm; the cost is on the bending part (mdp.arm_bending_moment) above a threshold
+# that leaves the normal pushing (80 N on the hand at the 75 mm forearm offset: 6 Nm).
+ARM_MOMENT_THRESHOLD_NM = 8.0
+ARM_MOMENT_WEIGHT = 0.005  # 50 Nm -> -8.8 per step, 20 Nm -> -0.7, 12 Nm -> -0.08
+ARM_MOMENT_SENSORS = tuple(f"robot/{s}_{j}_moment" for s in "lr" for j in ("shoulder", "elbow"))
+
+
+def _add_arm_moment_cost(cfg: ManagerBasedRlEnvCfg) -> None:
+    from mjlab.managers.reward_manager import RewardTermCfg
+    from mjlab.sensor import BuiltinSensorCfg, ObjRef
+
+    from mjlab_microduck.tasks import mdp as microduck_mdp
+
+    sensors = tuple(
+        BuiltinSensorCfg(
+            name=f"{s}_{j}_moment",
+            sensor_type="torque",
+            obj=ObjRef(type="site", name=f"{s}_{j}_site", entity="robot"),
+        )
+        for s in "lr"
+        for j in ("shoulder", "elbow")
+    )
+    assert tuple(sn.prefixed_name for sn in sensors) == ARM_MOMENT_SENSORS
+    cfg.scene.sensors = tuple(cfg.scene.sensors) + sensors
+    act = cfg.actions["joint_pos"]
+    if hasattr(act, "moment_sensors"):
+        act.moment_sensors = ARM_MOMENT_SENSORS
+    cfg.rewards["arm_moment"] = RewardTermCfg(
+        func=microduck_mdp.arm_joint_moment_cost,
+        weight=-ARM_MOMENT_WEIGHT,
+        params={"sensor_names": ARM_MOMENT_SENSORS, "threshold_nm": ARM_MOMENT_THRESHOLD_NM},
+    )
 
 
 # =============================================================================

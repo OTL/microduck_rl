@@ -9566,6 +9566,41 @@ def joint_torque_sq_cost(env: ManagerBasedRlEnv, joint_regex: str = r".*ankle_pi
     return sq.sum(dim=1)
 
 
+def arm_bending_moment(env: ManagerBasedRlEnv, sensor_names: tuple[str, ...]) -> torch.Tensor:
+    """[B] largest bending moment [Nm] across the arm joint torque sensors: the torque the
+    parent applies to the link at the joint (MuJoCo torque sensor, site frame x forward,
+    y the joint axis, z along the link), without its joint-axis part (the motor torque):
+    |(Mx, Mz)|. This is what the shoulder mount, the arm plates and the motor bearings carry
+    (out-of-plane bending of the arm, twist about the link)."""
+    out = None
+    for name in sensor_names:
+        t = torch.nan_to_num(env.scene.sensors[name].data)
+        m = torch.sqrt(t[:, 0] ** 2 + t[:, 2] ** 2)
+        out = m if out is None else torch.maximum(out, m)
+    assert out is not None
+    return out
+
+
+def arm_joint_moment_cost(
+    env: ManagerBasedRlEnv,
+    sensor_names: tuple[str, ...],
+    threshold_nm: float = 5.0,
+    action_name: str = "joint_pos",
+) -> torch.Tensor:
+    """COST (>= 0): relu(M - threshold)^2 [Nm^2], M = arm_bending_moment, the largest over
+    the physics substeps when the action term records it (moment_max), else at the end of
+    the step. The arm-strength check (2026-10-19) found 55-73 Nm at the shoulder when the arm
+    is trapped under the falling / rolling body (p99 7 Nm), past the printed shoulder mount
+    and likely the motor bearing. Logs the batch max (Metrics/arm_moment_nm_max) and mean."""
+    m = arm_bending_moment(env, sensor_names)
+    term = env.action_manager.get_term(action_name)
+    if getattr(term, "moment_max", None) is not None:
+        m = torch.maximum(m, term.moment_max)
+    env.extras["log"]["Metrics/arm_moment_nm_max"] = m.max()
+    env.extras["log"]["Metrics/arm_moment_nm_mean"] = m.mean()
+    return torch.nan_to_num(torch.square(torch.clamp(m - threshold_nm, min=0.0)), nan=0.0)
+
+
 def skill_residual_l2(env: ManagerBasedRlEnv, action_name: str = "joint_pos") -> torch.Tensor:
     """COST (>= 0): |a|^2 of the residual action (stay on the feed-forward unless it
     pays off)."""
@@ -9829,6 +9864,8 @@ class GetupReferenceJointPositionAction(_JointAction):
         self.bus5_max = torch.zeros(self.num_envs, device=dev)
         self._bus_hist = torch.zeros(self.num_envs, max(1, round(0.005 / self._pdt)), device=dev)
         self._bus_k = 0
+        # arm joint load (arm_joint_moment_cost): largest bending moment over the substeps
+        self.moment_max = torch.zeros(self.num_envs, device=dev) if cfg.moment_sensors else None
 
     @staticmethod
     def _keyed(t, q_start, keys, t_keys, durs, prep):
@@ -9885,10 +9922,15 @@ class GetupReferenceJointPositionAction(_JointAction):
         self._raw_actions[:] = actions
         self.bus_max.zero_()
         self.bus5_max.zero_()
+        if self.moment_max is not None:
+            self.moment_max.zero_()
 
     def apply_actions(self) -> None:
         # bus current of the physics step just taken
         i_bus = qdd_bus_current(self._env_ref, self._entity)
+        if self.moment_max is not None:
+            m = arm_bending_moment(self._env_ref, self.cfg.moment_sensors)
+            self.moment_max = torch.maximum(self.moment_max, m)
         self.bus_max = torch.maximum(self.bus_max, i_bus)
         self._bus_hist[:, self._bus_k % self._bus_hist.shape[1]] = i_bus
         self._bus_k += 1
@@ -9909,6 +9951,7 @@ class GetupReferenceJointPositionActionCfg(_JointPositionActionCfgBase):
     residual_gain: float = 1.0
     zero_residual: bool = False  # play the found motion alone (validation)
     roll_path: str = ""  # chained get-up: roll onto the back first from the front
+    moment_sensors: tuple[str, ...] = ()  # torque sensors at the arm joints: track the peak per policy step
 
     def build(self, env: ManagerBasedRlEnv) -> GetupReferenceJointPositionAction:
         return GetupReferenceJointPositionAction(self, env)

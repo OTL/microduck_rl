@@ -364,6 +364,10 @@ def add_arms(spec: mujoco.MjSpec) -> mujoco.MjSpec:
         # elbow axis -y: + bends the forearm forward (+x), like a human elbow
         # (OTL 2026-10-18; with +y the forearm bent backward)
         fore.add_joint(name=f"{nm}_elbow", range=list(ARM_ELBOW_RANGE), **{**jopt, "axis": [0, -1, 0]})
+        # frames at the joint axes for the force / torque sensors of the arm load cost
+        # (mdp.arm_joint_moment_cost): x forward, y the joint axis, z along the link
+        arm.add_site(name=f"{nm}_shoulder_site", group=4)
+        fore.add_site(name=f"{nm}_elbow_site", group=4)
         # shoulder mount, fixed to the torso (own body: the torso has an explicit inertial)
         torso.add_body(
             name=f"{nm}_shoulder_mount",

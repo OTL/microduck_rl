@@ -370,3 +370,45 @@ def test_walking_arms_ankle_torque_cost_is_staged(factory):
     st = cfg.curriculum["ankle_torque_weight"].params["weight_stages"]
     assert st[0]["weight"] == 0.0 and all(s["weight"] <= 0 for s in st) and st[-1]["weight"] < 0
     assert [s["step"] for s in st] == sorted(s["step"] for s in st)
+
+
+def test_arm_moment_sensor_reads_the_out_of_plane_bending():
+    """The torque sensors at the arm joints (shoulder / elbow sites) read the bending the
+    shoulder mount carries: a sideways (y) push on the hand of the hanging arm gives
+    |Mx| = F x arm length at the shoulder, and arm_bending_moment drops the joint-axis
+    part (the motor torque)."""
+    import mujoco
+
+    from mjlab_microduck.tasks import qdd_biped_arms as A
+
+    spec = rc.get_qdd_biped_getup_arms_spec()
+    for s in "lr":
+        for j in ("shoulder", "elbow"):
+            spec.add_sensor(name=f"{s}_{j}_moment", type=mujoco.mjtSensor.mjSENS_TORQUE,
+                            objtype=mujoco.mjtObj.mjOBJ_SITE, objname=f"{s}_{j}_site")
+    m = spec.compile()
+    m.opt.gravity[:] = 0.0
+    d = mujoco.MjData(m)
+    mujoco.mj_forward(m, d)
+    fore = m.body("l_forearm").id
+    tip = d.xpos[fore] + d.xmat[fore].reshape(3, 3) @ np.array([0, 0, -(rc.ARM_LENGTH - rc.ARM_UPPER)])
+    f = 20.0
+    d.xfrc_applied[fore, 1] = f
+    d.xfrc_applied[fore, 3:] = np.cross(tip - d.xpos[fore], [0, f, 0])  # force at the hand tip
+    mujoco.mj_forward(m, d)
+    t = d.sensor("l_shoulder_moment").data
+    lever = np.linalg.norm(tip - d.site("l_shoulder_site").xpos)
+    assert np.hypot(t[0], t[2]) == pytest.approx(f * lever, rel=0.05)
+    assert abs(t[1]) < 0.05 * f * lever  # a sideways push does not load the shoulder motor
+    assert len(A.ARM_MOMENT_SENSORS) == 4
+
+
+def test_chain_getup_pays_for_arm_bending():
+    from mjlab_microduck.tasks import qdd_biped_arms as A
+
+    cfg = A.make_qdd_biped_getup_chain_arms_env_cfg()
+    r = cfg.rewards["arm_moment"]
+    assert r.weight < 0 and r.params["sensor_names"] == A.ARM_MOMENT_SENSORS
+    assert cfg.actions["joint_pos"].moment_sensors == A.ARM_MOMENT_SENSORS
+    names = {getattr(sn, "prefixed_name", sn.name) for sn in cfg.scene.sensors}
+    assert set(A.ARM_MOMENT_SENSORS) <= names
