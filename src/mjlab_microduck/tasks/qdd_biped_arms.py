@@ -311,18 +311,21 @@ def make_qdd_biped_jump_arms_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg
 # skill clock (hop.json: crouch to 1.0 s, hold to 1.2 s, take-off 1.293 s, touchdown
 # 1.469 s). Shoulder - = forward.
 JUMP_ARM_SWING_KEYS = {
-    # From the standing arm pose, swing forward-up through the push and back after the
-    # landing (table alone, 2 nominal runs, 2026-10-19: CoM rise 5.9 -> 7.5 cm, take-off
-    # 1.05 -> 1.14 m/s, peak bus 37 -> 46 A; a back swing while crouching first gave less
-    # rise for more current, a straight elbow too).
+    # From the standing arm pose, a slow swing forward-up from the end of the crouch to the
+    # take-off, back after the landing. Table alone, 2 nominal runs (2026-10-19):
+    #   no swing: CoM rise 5.9 cm, take-off 1.05 m/s, peak bus 37 A
+    #   this:     CoM rise 7.2 cm, take-off 1.11 m/s, peak bus 37 A, landing tilt 16 -> 11 deg
+    # A fast swing to -1.0 rad in 0.2 s (7.5 cm) drew 46 A: arms9_hop_swing ended 87% of its
+    # episodes on the bus overcurrent and never learned the jump. A back swing while crouching
+    # and straight elbows gave less rise for more current.
     r".*_shoulder_pitch": (
         (0.0, ARM_WALK_SHOULDER0),
-        (1.12, ARM_WALK_SHOULDER0),
-        (1.32, -1.0),  # forward-up through the push
-        (1.5, -0.5),
-        (1.85, ARM_WALK_SHOULDER0),
+        (1.0, ARM_WALK_SHOULDER0),
+        (1.32, -0.7),  # forward-up through the push
+        (1.55, -0.4),
+        (1.9, ARM_WALK_SHOULDER0),
     ),
-    r".*_elbow": ((0.0, ARM_WALK_ELBOW0), (1.85, ARM_WALK_ELBOW0)),
+    r".*_elbow": ((0.0, ARM_WALK_ELBOW0), (2.6, ARM_WALK_ELBOW0)),
 }
 JUMP_ARM_SWING_STD = 0.5  # rad: a guide, the policy may change the swing
 JUMP_ARM_SWING_WEIGHT = 1.0
