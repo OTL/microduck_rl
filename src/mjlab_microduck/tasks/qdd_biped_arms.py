@@ -130,6 +130,7 @@ def add_arms_to_env_cfg(
     getup: bool = False,
     envelope: bool = True,
     collide: bool = True,
+    explicit_kd: bool = False,
 ) -> ManagerBasedRlEnvCfg:
     """Put the arms on the robot of a QDD biped env cfg (in place; returns it).
 
@@ -138,13 +139,15 @@ def add_arms_to_env_cfg(
     get-up model has them already). The arm actuator copies the style and the delay
     of the legs' first actuator. ``policy_arms`` False: action, joint obs and the
     joint-set rewards stay on the legs; the arm targets stay at 0. ``getup``: the
-    robot entity is the get-up collision model."""
+    robot entity is the get-up collision model. ``explicit_kd``: every kd stays in the
+    explicit PD, clipped together with kp (the drivers' MIT loop; needs a short
+    physics step), never joint damping."""
     from mjlab_microduck.actuator.qdd_motor import QddMotorActuatorCfg
 
     robot = cfg.scene.entities["robot"]
     art = robot.articulation
     legs = _envelope_like(art.actuators) if envelope else tuple(art.actuators)
-    implicit_kd = isinstance(legs[0], QddMotorActuatorCfg)  # arm_actuator_like: kd in the joint then
+    implicit_kd = isinstance(legs[0], QddMotorActuatorCfg) and not explicit_kd  # arm_actuator_like: kd in the joint then
     leg_kd: tuple = ()
     if implicit_kd and cfg.sim.mujoco.timestep >= IMPLICIT_KD_MIN_DT:
         # Explicit PD (the envelope actuator) at 5 ms: the light feet chatter at 15 rad/s
@@ -155,7 +158,7 @@ def add_arms_to_env_cfg(
         leg_kd = tuple((tuple(a.target_names_expr), float(a.damping)) for a in legs)
         legs = tuple(replace(a, damping=0.0) for a in legs)
     robot.spec_fn = partial(_arms_spec, robot.spec_fn, getup, collide, implicit_kd, leg_kd)
-    if implicit_kd and "randomize_motor_envelope" not in cfg.events:
+    if isinstance(legs[0], QddMotorActuatorCfg) and "randomize_motor_envelope" not in cfg.events:
         # as the jump: the driver clamp is fixed, the envelope (bus voltage, strength) varies
         from mjlab.managers import EventTermCfg
 
@@ -168,7 +171,10 @@ def add_arms_to_env_cfg(
             mode="reset",
             params={"v_bus_range": MOTOR_V_BUS_RANGE, "strength_range": MOTOR_STRENGTH_RANGE},
         )
-    robot.articulation = replace(art, actuators=legs + (rc.arm_actuator_like(legs[0]),))
+    arm = rc.arm_actuator_like(legs[0])
+    if explicit_kd:
+        arm = replace(arm, damping=rc.ARM_KD)
+    robot.articulation = replace(art, actuators=legs + (arm,))
     if collide or getup:
         # more contact shapes (motor housings, arms): room for a robot lying on the floor
         cfg.sim.nconmax = max(cfg.sim.nconmax or 0, 120)
@@ -299,10 +305,53 @@ def make_qdd_biped_jump_arms_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg
     return cfg
 
 
-def make_qdd_biped_getup_arms_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+GETUP_REF_PHYSICS_DT = 0.002  # the found motions were searched at 2 ms
+
+
+def _set_physics_dt(cfg: ManagerBasedRlEnvCfg, dt: float) -> None:
+    """Physics timestep dt at the same 50 Hz policy: decimation, the actuator lags (in
+    physics steps) and the per-substep contact history follow. The found get-up
+    replayed in the search model stands from 31/32 library falls at 2 ms but 10/32
+    at 5 ms (the training default), so the residual tasks run at the search's dt,
+    with every kd in the explicit PD like the search and the drivers (at 5 ms the kd
+    is joint damping outside the torque clamp: it ate the torque of fast joints and
+    the found motion never sat up)."""
+    from dataclasses import replace as dc_replace
+
+    old_dt = cfg.sim.mujoco.timestep
+    policy_dt = old_dt * cfg.decimation
+    cfg.sim.mujoco.timestep = dt
+    cfg.decimation = int(round(policy_dt / dt))
+    assert abs(cfg.decimation * dt - policy_dt) < 1e-9
+    k = old_dt / dt
+    robot = cfg.scene.entities["robot"]
+    art = robot.articulation
+    robot.articulation = replace(
+        art,
+        actuators=tuple(
+            replace(
+                a,
+                delay_min_lag=int(round(getattr(a, "delay_min_lag", 0) * k)),
+                delay_max_lag=int(round(getattr(a, "delay_max_lag", 0) * k)),
+            )
+            for a in art.actuators
+        ),
+    )
+    cfg.scene.sensors = tuple(
+        dc_replace(sn, history_length=cfg.decimation) if getattr(sn, "history_length", 0) > 1 else sn
+        for sn in cfg.scene.sensors
+    )
+
+
+def make_qdd_biped_getup_arms_env_cfg(play: bool = False, physics_dt: float | None = None) -> ManagerBasedRlEnvCfg:
+    """``physics_dt``: run the physics at this step (policy still 50 Hz) with every
+    kd in the explicit PD (see _set_physics_dt)."""
     from mjlab_microduck.tasks.qdd_biped_getup_env_cfg import make_qdd_biped_getup_env_cfg
 
-    cfg = add_arms_to_env_cfg(make_qdd_biped_getup_env_cfg(play=play), policy_arms=True, getup=True)
+    base = make_qdd_biped_getup_env_cfg(play=play)
+    if physics_dt is not None:
+        _set_physics_dt(base, physics_dt)
+    cfg = add_arms_to_env_cfg(base, policy_arms=True, getup=True, explicit_kd=physics_dt is not None)
     reset = cfg.events["reset_getup"]
     reset.params["states_path"] = str(rc.QDD_GETUP_ARMS_STATES_NPZ)
     reset.params["kind_probs"] = dict(GETUP_ARMS_KIND_PROBS)
@@ -343,7 +392,7 @@ def make_qdd_biped_getup_supine_arms_env_cfg(play: bool = False) -> ManagerBased
 
     from mjlab_microduck.tasks import mdp as microduck_mdp
 
-    cfg = make_qdd_biped_getup_arms_env_cfg(play=play)
+    cfg = make_qdd_biped_getup_arms_env_cfg(play=play, physics_dt=GETUP_REF_PHYSICS_DT)
     old = cfg.actions["joint_pos"]
     cfg.actions["joint_pos"] = microduck_mdp.GetupReferenceJointPositionActionCfg(
         entity_name=old.entity_name,

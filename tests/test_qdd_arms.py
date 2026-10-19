@@ -298,3 +298,20 @@ def test_getup_chain_task_roll_then_getup():
     start = K(torch.tensor([0.0]), q0, keys, t_keys, f(durs), prep)
     end = K(torch.tensor([float(t_keys[-1]) - 1e-4]), q0, keys, t_keys, f(durs), prep)
     assert torch.allclose(start, q0) and torch.allclose(end, keys[-1:], atol=1e-3)
+
+
+def test_getup_residual_tasks_run_like_the_search():
+    """The found motions were searched at 2 ms with the drivers' PD (kd clipped with
+    kp). At the training default (5 ms, kd as joint damping outside the clamp) the
+    supine motion never sat up; the residual tasks run at 2 ms with explicit kd."""
+    from mjlab_microduck.tasks import qdd_biped_arms as A
+
+    for make in (A.make_qdd_biped_getup_supine_arms_env_cfg, A.make_qdd_biped_getup_chain_arms_env_cfg):
+        cfg = make()
+        assert cfg.sim.mujoco.timestep == A.GETUP_REF_PHYSICS_DT
+        assert abs(cfg.sim.mujoco.timestep * cfg.decimation - 0.02) < 1e-9
+        acts = cfg.scene.entities["robot"].articulation.actuators
+        assert all(a.damping > 0 for a in acts)  # kd in the PD, not in the joints
+        assert all(a.delay_max_lag * cfg.sim.mujoco.timestep <= 0.0101 for a in acts)
+    # the from-scratch get-up keeps its 5 ms physics
+    assert A.make_qdd_biped_getup_arms_env_cfg().sim.mujoco.timestep == 0.005
