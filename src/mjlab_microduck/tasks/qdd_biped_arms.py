@@ -293,6 +293,34 @@ def _add_ankle_torque_cost(cfg: ManagerBasedRlEnvCfg) -> None:
     )
 
 
+# Motor bus current of walking (goal 2026-10-19: every skill within the power limits):
+# arms7 at 0.3 m/s flat drew 5 ms peaks of 38 A (median env) to 46 A with domain
+# randomisation (scripts/eval_qdd_constraints.py), past the ~35 A the battery sag allows
+# (LM5069 cut at 48.5 A minimum). Cost above WALK_BUS_THRESHOLD_A on the current at the end
+# of each policy step, staged with the ankle cost (both buy heat / sag with gait effort).
+WALK_BUS_THRESHOLD_A = 25.0
+WALK_BUS_WEIGHT_STAGES_IT = ((0, 0.0), (500, 0.0005), (1000, 0.001), (1500, 0.002))  # (iteration, weight)
+
+
+def _add_walk_bus_cost(cfg: ManagerBasedRlEnvCfg) -> None:
+    from mjlab.managers.curriculum_manager import CurriculumTermCfg
+    from mjlab.managers.reward_manager import RewardTermCfg
+
+    from mjlab_microduck.tasks import mdp as microduck_mdp
+    from mjlab_microduck.tasks.qdd_biped_velocity_env_cfg import NUM_STEPS_PER_ENV
+
+    cfg.rewards["bus_current"] = RewardTermCfg(
+        func=microduck_mdp.skill_bus_current_cost, weight=0.0, params={"threshold_a": WALK_BUS_THRESHOLD_A}
+    )
+    cfg.curriculum["bus_current_weight"] = CurriculumTermCfg(
+        func=microduck_mdp.reward_weight,
+        params={
+            "reward_name": "bus_current",
+            "weight_stages": [{"step": it * NUM_STEPS_PER_ENV, "weight": -w} for it, w in WALK_BUS_WEIGHT_STAGES_IT],
+        },
+    )
+
+
 def make_qdd_biped_velocity_arms_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     from mjlab_microduck.tasks.qdd_biped_velocity_env_cfg import make_qdd_biped_velocity_env_cfg
 
@@ -301,6 +329,7 @@ def make_qdd_biped_velocity_arms_env_cfg(play: bool = False) -> ManagerBasedRlEn
     _set_walk_legs(cfg)
     _add_arm_swing(cfg)
     _add_ankle_torque_cost(cfg)
+    _add_walk_bus_cost(cfg)
     return cfg
 
 
@@ -312,6 +341,7 @@ def make_qdd_biped_rough_arms_env_cfg(play: bool = False) -> ManagerBasedRlEnvCf
     _set_walk_legs(cfg)
     _add_arm_swing(cfg)
     _add_ankle_torque_cost(cfg)
+    _add_walk_bus_cost(cfg)
     return cfg
 
 

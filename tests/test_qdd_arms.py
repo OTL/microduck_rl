@@ -412,3 +412,14 @@ def test_chain_getup_pays_for_arm_bending():
     assert cfg.actions["joint_pos"].moment_sensors == A.ARM_MOMENT_SENSORS
     names = {getattr(sn, "prefixed_name", sn.name) for sn in cfg.scene.sensors}
     assert set(A.ARM_MOMENT_SENSORS) <= names
+
+
+@pytest.mark.parametrize("factory", ["make_qdd_biped_velocity_arms_env_cfg", "make_qdd_biped_rough_arms_env_cfg"])
+def test_walking_arms_bus_current_cost_is_staged(factory):
+    """Walking within the power limits (2026-10-19): arms7 drew 38-46 A peaks at 0.3 m/s."""
+    from mjlab_microduck.tasks import qdd_biped_arms as A
+
+    cfg = getattr(A, factory)()
+    assert cfg.rewards["bus_current"].weight == 0.0
+    st = cfg.curriculum["bus_current_weight"].params["weight_stages"]
+    assert st[0]["weight"] == 0.0 and all(s["weight"] <= 0 for s in st) and st[-1]["weight"] < 0
