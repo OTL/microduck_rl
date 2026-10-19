@@ -236,6 +236,20 @@ OTLさんの方針（10/19 朝）: うつ伏せからは寝返りで仰向けに
   - 修正で最後のバランスを直すのが学習の役目。
 - 寝返り（うつ伏せ → 仰向け）は `gpu_cem.py --face prone --goal supine` で探す。
 
+### うつ伏せ → 横に転がって仰向け → 起き上がり（つないだ課題、10/19）
+
+OTLさん「うつ伏せから前転じゃなく、横にごろごろして仰向けになって欲しい」への対応。
+
+- 寝返りは `gpu_cem.py --goal supine --roll side` で探した（宙返り方向に回ると減点）。`logs/getup_arms_v7/roll_side_s0.npz` が探索モデルで 31/32。学習用のシミュレーションで手本だけ流しても、うつ伏せから始めた回はすべて仰向けで止まった（外乱なし 27/27、外乱あり 21/21）。
+- `scripts/qdd_getup_search/export_roll_ref.py` で手本の表（`robot/qdd_biped/getup_roll_ref_arms.npz`）にした。
+- 課題 `Mjlab-Getup-Chain-QddBipedArms` は仰向けの課題に寝返りの段を前に足したもの（`GetupReferenceJointPositionAction` の `roll_path`）。
+  - うつ伏せの開始（ライブラリの `prone`、手本の途中の姿勢は除く）は時計を −5.65 秒から始め、時計が負の間は寝返りの表を流す。0 秒からは寝返りの最後のキーを起点に、仰向けの起き上がりを流す。
+  - 時計の観測は寝返りと起き上がりを通した長さで割る（50 次元のまま）。
+  - 手本の追従の報酬（寝返りを含まない）は外した。手本は行動の基準として流れている。
+  - エピソードは 14 秒。
+  - policy_io の `reference.roll` に寝返りの表と、いつ使うか（胴の x 軸が下向き）が入る。
+- 確かめ方: `uv run python scripts/eval_qdd_getup_supine.py zero --chain`（うつ伏せの開始だけの成功率も出る）。
+
 ### 膝を伸ばし気味に歩く（10/19）
 
 OTLさん「歩行でなるべく膝を曲げない歩き方にしたい」への対応。腕つきの歩行・不整地（`tasks/qdd_biped_arms.py` の `_set_walk_legs`）で、既定の姿勢を変えた。

@@ -279,6 +279,10 @@ def run_export(task_id: str, cfg: ExportConfig) -> ExportResult:
         from mjlab_microduck.tasks.qdd_biped_velocity_env_cfg import policy_io_onnx_metadata
 
         metadata.update(policy_io_onnx_metadata())
+    elif task_id == "Mjlab-Getup-Chain-QddBipedArms":
+        from mjlab_microduck.tasks.qdd_biped_arms import getup_chain_arms_policy_io_onnx_metadata
+
+        metadata.update(getup_chain_arms_policy_io_onnx_metadata())
     elif task_id == "Mjlab-Getup-Supine-QddBipedArms":
         from mjlab_microduck.tasks.qdd_biped_arms import getup_supine_arms_policy_io_onnx_metadata
 

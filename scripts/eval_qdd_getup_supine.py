@@ -3,6 +3,9 @@ from each kind of start, on CPU.
 
   uv run python scripts/eval_qdd_getup_supine.py zero          # the found motion alone
   uv run python scripts/eval_qdd_getup_supine.py policy.onnx   # feed-forward + residual
+  uv run python scripts/eval_qdd_getup_supine.py zero --chain  # roll + get-up (Mjlab-Getup-Chain-QddBipedArms)
+
+With --chain the starts lying on the front (roll first) are also counted on their own.
 
 "stood" = at the end of the episode the torso is within 15 deg of upright and its
 height within 3 cm of standing.
@@ -21,14 +24,18 @@ from mjlab.envs import ManagerBasedRlEnv
 
 from mjlab_microduck.robot.qdd_biped_constants import STAND_BASE_Z
 from mjlab_microduck.tasks import mdp as microduck_mdp
-from mjlab_microduck.tasks.qdd_biped_arms import make_qdd_biped_getup_supine_arms_env_cfg
+from mjlab_microduck.tasks.qdd_biped_arms import (
+    make_qdd_biped_getup_chain_arms_env_cfg,
+    make_qdd_biped_getup_supine_arms_env_cfg,
+)
 
 KINDS = ("push", "stride", "drop", "crouch", "bridge_supine", "path")
 
 
-def run(onnx_path: str, kind: str, n_envs: int, play: bool, seed: int) -> float:
+def run(onnx_path: str, kind: str, n_envs: int, play: bool, seed: int, chain: bool = False):
     torch.manual_seed(seed)
-    cfg = make_qdd_biped_getup_supine_arms_env_cfg(play=play)
+    make = make_qdd_biped_getup_chain_arms_env_cfg if chain else make_qdd_biped_getup_supine_arms_env_cfg
+    cfg = make(play=play)
     cfg.scene.num_envs = n_envs
     cfg.curriculum = {}
     r = cfg.events["reset_getup"].params
@@ -45,6 +52,9 @@ def run(onnx_path: str, kind: str, n_envs: int, play: bool, seed: int) -> float:
 
         sess = ort.InferenceSession(onnx_path)
     obs, _ = env.reset()
+    term = env.event_manager.get_term_cfg("reset_getup").func
+    i = term.index.clamp(min=0)
+    front = term.prone[i] & ~term.is_path[i]
     steps = int(round(cfg.episode_length_s / env.step_dt)) - 2
     robot = env.scene["robot"]
     for _ in range(steps):
@@ -58,7 +68,8 @@ def run(onnx_path: str, kind: str, n_envs: int, play: bool, seed: int) -> float:
     z = microduck_mdp.qdd_root_height(env)
     ok = (up > math.cos(math.radians(15))) & ((z - STAND_BASE_Z).abs() < 0.03)
     env.close()
-    return float(ok.float().mean())
+    fr = float(ok[front].float().mean()) if front.any() else float("nan")
+    return float(ok.float().mean()), int(front.sum()), fr
 
 
 def main():
@@ -68,9 +79,12 @@ def main():
     ap.add_argument("--kinds", nargs="*", default=list(KINDS))
     ap.add_argument("--play", action="store_true", help="no domain randomisation")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--chain", action="store_true", help="the chained task (roll first from the front)")
     a = ap.parse_args()
     for k in a.kinds:
-        print(f"{k:14s} stood {run(a.onnx, k, a.n, a.play, a.seed):.2f}", flush=True)
+        r, nf, fr = run(a.onnx, k, a.n, a.play, a.seed, a.chain)
+        extra = f"   front starts {nf}: stood {fr:.2f}" if a.chain and nf else ""
+        print(f"{k:14s} stood {r:.2f}{extra}", flush=True)
 
 
 if __name__ == "__main__":

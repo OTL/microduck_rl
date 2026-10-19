@@ -503,6 +503,9 @@ from .qdd_biped_arms import (
     GETUP_SUPINE_INIT_STD as _QDD_GETUP_SUPINE_INIT_STD,
     getup_supine_arms_policy_io_onnx_metadata as _qdd_getup_supine_arms_policy_io_onnx_metadata,
     make_qdd_biped_getup_supine_arms_env_cfg,
+    GETUP_CHAIN_ARMS_TASK_ID as _QDD_GETUP_CHAIN_ARMS_TASK_ID,
+    getup_chain_arms_policy_io_onnx_metadata as _qdd_getup_chain_arms_policy_io_onnx_metadata,
+    make_qdd_biped_getup_chain_arms_env_cfg,
     make_qdd_biped_getup_arms_env_cfg,
     make_qdd_biped_jump_arms_env_cfg,
     make_qdd_biped_rough_arms_env_cfg,
@@ -584,6 +587,16 @@ class QddBipedGetupSupineArmsOnPolicyRunner(MicroduckOnPolicyRunner):
         )
 
 
+class QddBipedGetupChainArmsOnPolicyRunner(MicroduckOnPolicyRunner):
+    """Attaches the chained get-up policy_io (roll + get-up reference) to every checkpoint ONNX."""
+
+    def save(self, path: str, infos=None):
+        super().save(path, infos)
+        _attach_onnx_metadata(
+            self, path, _qdd_getup_chain_arms_policy_io_onnx_metadata, "policy_io (getup chain arms)"
+        )
+
+
 def _arms_rl(base, **kw):
     alg = base.algorithm
     sym = alg.symmetry_cfg
@@ -639,4 +652,22 @@ register_mjlab_task(
         run_name="qdd_biped_getup_supine_arms",
     ),
     runner_cls=QddBipedGetupSupineArmsOnPolicyRunner,
+)
+register_mjlab_task(
+    task_id=_QDD_GETUP_CHAIN_ARMS_TASK_ID,
+    env_cfg=make_qdd_biped_getup_chain_arms_env_cfg(),
+    play_env_cfg=make_qdd_biped_getup_chain_arms_env_cfg(play=True),
+    rl_cfg=replace(
+        QddBipedGetupRlCfg,
+        actor=replace(
+            QddBipedGetupRlCfg.actor,
+            distribution_cfg={
+                **QddBipedGetupRlCfg.actor.distribution_cfg,
+                "init_std": _QDD_GETUP_SUPINE_INIT_STD,
+            },
+        ),
+        experiment_name="qdd_biped_getup_chain_arms",
+        run_name="qdd_biped_getup_chain_arms",
+    ),
+    runner_cls=QddBipedGetupChainArmsOnPolicyRunner,
 )

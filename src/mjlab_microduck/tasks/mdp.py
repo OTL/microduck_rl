@@ -9698,7 +9698,13 @@ class GetupReferenceJointPositionAction(_JointAction):
     starts in, ramp to ref_keys[0] in ref_prep_s, then key to key, then hold
     ref_keys[-1] (standing). Clock at reset (reset_from_getup_states' index):
     path states start at their demo frame (and ramp from the demo's own first
-    pose), standing starts after the end, every other start at 0."""
+    pose), standing starts after the end, every other start at 0.
+
+    ``roll_path`` (the chained get-up): a roll from the front onto the back
+    (scripts/qdd_getup_search/export_roll_ref.py) plays first for lying starts on
+    the front (reset_from_getup_states.prone, path states excepted): their clock
+    starts at -roll length, the roll ramps from the start pose to its first key in
+    its own prep, and the get-up then ramps from the roll's last key."""
 
     cfg: "GetupReferenceJointPositionActionCfg"
 
@@ -9723,16 +9729,47 @@ class GetupReferenceJointPositionAction(_JointAction):
         self.q_start = self._entity.data.default_joint_pos[:, self._target_ids].clone()
         self.residual_gain = float(cfg.residual_gain)
         self.zero_residual = bool(cfg.zero_residual)
+        self.t_roll = 0.0  # length of the roll stage (0 = no roll stage)
+        if cfg.roll_path:
+            rr = np.load(cfg.roll_path)
+            rn = [str(n) for n in rr["joint_names"]]
+            ro = [rn.index(n) for n in self._target_names]
+            self.roll_keys = f(rr["ref_keys"][:, ro])
+            rd = np.asarray(rr["ref_durs_s"], dtype=np.float64)
+            self.roll_prep = float(rr["ref_prep_s"])
+            self.roll_t_keys = f(self.roll_prep + np.r_[0.0, np.cumsum(rd)])
+            self.roll_durs = f(np.maximum(rd, 1e-6))
+            self.t_roll = float(self.roll_t_keys[-1])
+            self.q_roll = self.q_start.clone()  # pose the roll ramps from
+
+    @staticmethod
+    def _keyed(t, q_start, keys, t_keys, durs, prep):
+        a = torch.clamp(t / prep, 0.0, 1.0).unsqueeze(1)
+        ramp = q_start + a * (keys[0] - q_start)
+        j = torch.clamp(torch.searchsorted(t_keys, t.contiguous(), right=True) - 1, 0, len(durs) - 1)
+        b = torch.clamp((t - t_keys[j]) / durs[j], 0.0, 1.0).unsqueeze(1)
+        seg = keys[j] + b * (keys[j + 1] - keys[j])
+        out = torch.where((t < prep).unsqueeze(1), ramp, seg)
+        return torch.where((t >= t_keys[-1]).unsqueeze(1), keys[-1].expand_as(out), out)
+
+    @property
+    def total_s(self) -> float:
+        """Length of the whole reference from a start on the front (roll + get-up)."""
+        return self.t_roll + self.t_end
+
+    def phase(self) -> torch.Tensor:
+        """[B] 0..1 along the whole reference (1 = its end, standing)."""
+        return torch.clamp((self.t + self.t_roll) / self.total_s, 0.0, 1.0)
 
     def reference(self, t: torch.Tensor, q_start: torch.Tensor) -> torch.Tensor:
-        """[B, J] open-loop target at time t [B] for envs starting at q_start [B, J]."""
-        a = torch.clamp(t / self.prep, 0.0, 1.0).unsqueeze(1)
-        prep = q_start + a * (self.keys[0] - q_start)
-        j = torch.clamp(torch.searchsorted(self.t_keys, t.contiguous(), right=True) - 1, 0, len(self.durs) - 1)
-        b = torch.clamp((t - self.t_keys[j]) / self.durs[j], 0.0, 1.0).unsqueeze(1)
-        seg = self.keys[j] + b * (self.keys[j + 1] - self.keys[j])
-        out = torch.where((t < self.prep).unsqueeze(1), prep, seg)
-        return torch.where((t >= self.t_end).unsqueeze(1), self.keys[-1].expand_as(out), out)
+        """[B, J] open-loop target at time t [B] for envs starting at q_start [B, J]
+        (t < 0: the roll stage, from self.q_roll)."""
+        out = self._keyed(t, q_start, self.keys, self.t_keys, self.durs, self.prep)
+        if self.t_roll > 0:
+            tr = (t + self.t_roll).clamp(min=0.0)
+            roll = self._keyed(tr, self.q_roll, self.roll_keys, self.roll_t_keys, self.roll_durs, self.roll_prep)
+            out = torch.where((t < 0).unsqueeze(1), roll, out)
+        return out
 
     def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
         super().reset(env_ids)
@@ -9745,9 +9782,15 @@ class GetupReferenceJointPositionAction(_JointAction):
         i = idx.clamp(min=0)
         path = term.is_path[i] & ~standing
         t0 = torch.where(path, term.demo_frame[i].clamp(min=0).float() * self.frame_dt, 0.0)
-        self.t[env_ids] = torch.where(standing, self.t_end, t0)
         q = self._entity.data.joint_pos[env_ids][:, self._target_ids]
-        self.q_start[env_ids] = torch.where(path.unsqueeze(1), self.demo_q0.expand_as(q), q)
+        q_start = torch.where(path.unsqueeze(1), self.demo_q0.expand_as(q), q)
+        if self.t_roll > 0:
+            roll = term.prone[i] & ~term.is_path[i] & ~standing
+            t0 = torch.where(roll, -self.t_roll, t0)
+            self.q_roll[env_ids] = q
+            q_start = torch.where(roll.unsqueeze(1), self.roll_keys[-1].expand_as(q), q_start)
+        self.t[env_ids] = torch.where(standing, self.t_end, t0)
+        self.q_start[env_ids] = q_start
 
     def process_actions(self, actions: torch.Tensor):
         self._raw_actions[:] = actions
@@ -9768,16 +9811,18 @@ class GetupReferenceJointPositionActionCfg(_JointPositionActionCfgBase):
     event_name: str = "reset_getup"
     residual_gain: float = 1.0
     zero_residual: bool = False  # play the found motion alone (validation)
+    roll_path: str = ""  # chained get-up: roll onto the back first from the front
 
     def build(self, env: ManagerBasedRlEnv) -> GetupReferenceJointPositionAction:
         return GetupReferenceJointPositionAction(self, env)
 
 
 def getup_ref_phase(env: ManagerBasedRlEnv, action_name: str = "joint_pos") -> torch.Tensor:
-    """OBS [B, 2]: where the get-up reference is, s = clock / its length (0..1, 1 after
-    the end = standing): [sin(pi s), cos(pi s)]. The robot's controller runs the same
+    """OBS [B, 2]: where the get-up reference is, s = (clock + roll length) / (roll +
+    get-up length) (0..1, 1 after the end = standing; no roll stage: clock / length):
+    [sin(pi s), cos(pi s)]. The robot's controller runs the same
     clock (it plays the reference)."""
     term = env.action_manager.get_term(action_name)
     assert isinstance(term, GetupReferenceJointPositionAction)
-    s = torch.clamp(term.t / term.t_end, 0.0, 1.0)
+    s = term.phase()
     return torch.stack([torch.sin(math.pi * s), torch.cos(math.pi * s)], dim=1)

@@ -366,6 +366,39 @@ def make_qdd_biped_getup_supine_arms_env_cfg(play: bool = False) -> ManagerBased
 
 
 # =============================================================================
+# Chained get-up (OTL 2026-10-19: "from prone, roll sideways onto the back, then get
+# up"): the supine task with a roll stage in front of its reference for starts lying
+# on the front (mdp.GetupReferenceJointPositionAction roll_path; the sideways roll
+# alone ends supine in every front start of the training sim). Front starts come
+# back; the reference is the feed-forward, so the demo-tracking reward (which has
+# no roll) is dropped.
+# =============================================================================
+GETUP_CHAIN_ARMS_TASK_ID = "Mjlab-Getup-Chain-QddBipedArms"
+GETUP_CHAIN_EPISODE_S = 14.0  # roll 5.7 s + get-up 4.9 s, then standing
+GETUP_CHAIN_KIND_PROBS = {
+    "push": 0.15,
+    "stride": 0.15,
+    "drop": 0.15,
+    "crouch": 0.1,
+    "path": 0.2,
+    "bridge_supine": 0.25,
+}
+
+
+def make_qdd_biped_getup_chain_arms_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+    cfg = make_qdd_biped_getup_supine_arms_env_cfg(play=play)
+    cfg.actions["joint_pos"].roll_path = str(rc.QDD_GETUP_ARMS_ROLL_NPZ)
+    cfg.episode_length_s = GETUP_CHAIN_EPISODE_S
+    reset = cfg.events["reset_getup"]
+    reset.params["kind_probs"] = dict(GETUP_CHAIN_KIND_PROBS)
+    reset.params["supine_only"] = False
+    cfg.rewards.pop("demo_tracking", None)
+    for name in [k for k, v in cfg.curriculum.items() if v.params.get("reward_name") == "demo_tracking"]:
+        cfg.curriculum.pop(name)
+    return cfg
+
+
+# =============================================================================
 # Policy I/O of the get-up with arms (robot/qdd_biped/policy_io_getup_arms.json).
 # Regenerate with  uv run python -m mjlab_microduck.tasks.qdd_biped_arms
 # =============================================================================
@@ -526,6 +559,51 @@ def getup_supine_arms_policy_io_onnx_metadata() -> dict[str, str]:
     import hashlib
 
     text = json.dumps(build_getup_supine_arms_policy_io(), indent=2) + "\n"
+    return {"policy_io": text, "policy_io_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()}
+
+
+def build_getup_chain_arms_policy_io() -> dict:
+    """The supine contract + the roll stage in front of the reference for starts
+    lying on the front."""
+    import numpy as np
+
+    io = build_getup_supine_arms_policy_io()
+    io["task"] = GETUP_CHAIN_ARMS_TASK_ID
+    rr = np.load(rc.QDD_GETUP_ARMS_ROLL_NPZ)
+    names = [str(n) for n in rr["joint_names"]]
+    order = [names.index(n) for n in io["action"]["joint_order"]]
+    durs = [float(x) for x in rr["ref_durs_s"]]
+    ref = io["reference"]
+    t_roll = float(rr["ref_prep_s"]) + sum(durs)
+    ref["roll"] = {
+        "prep_s": float(rr["ref_prep_s"]),
+        "keys_rad": [[float(v) for v in k[order]] for k in rr["ref_keys"]],
+        "durs_s": durs,
+        "t_end_s": t_roll,
+        "when": "the torso lies on its front at the start: torso x axis pointing down, i.e. "
+        "2 (x z - w y) < 0 for the torso quaternion (w, x, y, z)",
+        "rule": "clock starts at -t_end_s; while the clock is < 0 the target is this table played the "
+        "same way (from the start joint positions) at clock + t_end_s; the get-up stage then ramps from "
+        "keys_rad[-1] of this table instead of the start joint positions",
+    }
+    for t in io["observation"]["terms"]:
+        if t["name"] == "ref_phase":
+            t["description"] = (
+                "s = (clock + reference.roll.t_end_s) / (reference.roll.t_end_s + reference.t_end_s), "
+                "clipped to 0..1: [sin(pi s), cos(pi s)] (the same denominator for every start)"
+            )
+    io["getup"]["episode_length_s"] = GETUP_CHAIN_EPISODE_S
+    io["getup"]["note"] = io["getup"]["note"].replace(
+        "supine only (from lying on the front, roll over to supine first); ",
+        "from the front: the roll stage first, then the supine get-up; ",
+    )
+    return io
+
+
+def getup_chain_arms_policy_io_onnx_metadata() -> dict[str, str]:
+    import hashlib
+
+    text = json.dumps(build_getup_chain_arms_policy_io(), indent=2) + "\n"
     return {"policy_io": text, "policy_io_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()}
 
 

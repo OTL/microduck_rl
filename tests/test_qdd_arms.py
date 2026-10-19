@@ -261,3 +261,40 @@ def test_walking_arms_straighter_knees():
     io = A.build_walking_arms_policy_io()
     q = dict(zip(io["action"]["joint_order"], io["action"]["default_joint_pos"]))
     assert q["l_knee"] == q["r_knee"] == A.WALK_KNEE
+
+
+def test_getup_chain_task_roll_then_getup():
+    """OTL 2026-10-19: from the front, roll sideways onto the back, then get up. The
+    chained task keeps front starts, plays the roll stage first (clock < 0) and hands
+    over to the supine get-up without a jump in the target."""
+    import torch
+
+    from mjlab_microduck.robot import qdd_biped_constants as rc
+    from mjlab_microduck.tasks import mdp as M
+    from mjlab_microduck.tasks import qdd_biped_arms as A
+
+    cfg = A.make_qdd_biped_getup_chain_arms_env_cfg()
+    act = cfg.actions["joint_pos"]
+    assert act.roll_path == str(rc.QDD_GETUP_ARMS_ROLL_NPZ)
+    assert cfg.events["reset_getup"].params["supine_only"] is False
+    assert "demo_tracking" not in cfg.rewards
+    assert not any(v.params.get("reward_name") == "demo_tracking" for v in cfg.curriculum.values())
+    assert cfg.episode_length_s >= 12.0
+    io = A.build_getup_chain_arms_policy_io()
+    assert io["observation"]["dim"] == 50 and io["task"] == A.GETUP_CHAIN_ARMS_TASK_ID
+    roll = io["reference"]["roll"]
+    assert len(roll["keys_rad"]) == len(roll["durs_s"]) + 1 and all(len(k) == 14 for k in roll["keys_rad"])
+    assert abs(roll["t_end_s"] - (roll["prep_s"] + sum(roll["durs_s"]))) < 1e-5
+
+    # reference continuity through the hand-over (no env: the reference math only)
+    rr = np.load(rc.QDD_GETUP_ARMS_ROLL_NPZ)
+    f = lambda a: torch.tensor(np.asarray(a, dtype=np.float32))  # noqa: E731
+    keys = f(rr["ref_keys"])
+    durs = np.asarray(rr["ref_durs_s"], dtype=np.float64)
+    prep = float(rr["ref_prep_s"])
+    t_keys = f(prep + np.r_[0.0, np.cumsum(durs)])
+    K = M.GetupReferenceJointPositionAction._keyed
+    q0 = torch.zeros(1, keys.shape[1])
+    start = K(torch.tensor([0.0]), q0, keys, t_keys, f(durs), prep)
+    end = K(torch.tensor([float(t_keys[-1]) - 1e-4]), q0, keys, t_keys, f(durs), prep)
+    assert torch.allclose(start, q0) and torch.allclose(end, keys[-1:], atol=1e-3)

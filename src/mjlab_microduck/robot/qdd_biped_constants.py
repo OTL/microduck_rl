@@ -443,6 +443,8 @@ def add_arms_getup(spec: mujoco.MjSpec) -> mujoco.MjSpec:
 # scripts/qdd_getup_search/export_arms_demo.py).
 QDD_GETUP_ARMS_STATES_NPZ: Path = Path(os.path.dirname(__file__)) / "qdd_biped" / "getup_states_arms.npz"
 QDD_GETUP_ARMS_DEMO_NPZ: Path = Path(os.path.dirname(__file__)) / "qdd_biped" / "getup_demo_traj_arms.npz"
+# prone -> supine sideways roll (gpu_cem --roll side, logs/getup_arms_v7/roll_side_s0.npz)
+QDD_GETUP_ARMS_ROLL_NPZ: Path = Path(os.path.dirname(__file__)) / "qdd_biped" / "getup_roll_ref_arms.npz"
 QDD_GETUP_ARMS_POLICY_IO_JSON: Path = Path(os.path.dirname(__file__)) / "qdd_biped" / "policy_io_getup_arms.json"
 
 
