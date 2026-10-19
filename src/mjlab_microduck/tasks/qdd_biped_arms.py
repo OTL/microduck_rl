@@ -276,7 +276,7 @@ def _add_arm_swing(cfg: ManagerBasedRlEnvCfg) -> None:
 ANKLE_TORQUE_WEIGHT_STAGES_IT = ((0, 0.0), (500, 0.01), (1000, 0.03), (1500, 0.05), (3000, 0.1))  # (iteration, weight)
 
 
-def _add_ankle_torque_cost(cfg: ManagerBasedRlEnvCfg) -> None:
+def _add_ankle_torque_cost(cfg: ManagerBasedRlEnvCfg, stages_it=ANKLE_TORQUE_WEIGHT_STAGES_IT) -> None:
     from mjlab.managers.curriculum_manager import CurriculumTermCfg
     from mjlab.managers.reward_manager import RewardTermCfg
 
@@ -290,7 +290,7 @@ def _add_ankle_torque_cost(cfg: ManagerBasedRlEnvCfg) -> None:
         func=microduck_mdp.reward_weight,
         params={
             "reward_name": "ankle_torque",
-            "weight_stages": [{"step": it * NUM_STEPS_PER_ENV, "weight": -w} for it, w in ANKLE_TORQUE_WEIGHT_STAGES_IT],
+            "weight_stages": [{"step": it * NUM_STEPS_PER_ENV, "weight": -w} for it, w in stages_it],
         },
     )
 
@@ -309,8 +309,15 @@ WALK_BUS_CAP_A = 30.0
 # (2 of 16 envs above 35 A). The stage at 3000 raises the weight for a resumed run.
 WALK_BUS_WEIGHT_STAGES_IT = ((0, 0.0), (500, 0.0003), (1000, 0.0006), (1500, 0.001), (3000, 0.003))  # (iteration, weight)
 
+# Rough ground: arms13_rough (resumed at bus 0.003 / ankle 0.1) learned to stand still on any
+# terrain (0.01-0.02 m/s for 0.3 commanded): on steps the current peaks are hard to avoid,
+# so the capped cost (0.003 x 30^2 = -2.7 per step) outweighed the speed tracking. Rough
+# keeps the bus weight at 0.001 (at most -0.9 per step) and raises only the ankle cost.
+ROUGH_BUS_WEIGHT_STAGES_IT = WALK_BUS_WEIGHT_STAGES_IT[:-1]
+ROUGH_ANKLE_TORQUE_WEIGHT_STAGES_IT = ANKLE_TORQUE_WEIGHT_STAGES_IT[:-1] + ((3000, 0.07),)
 
-def _add_walk_bus_cost(cfg: ManagerBasedRlEnvCfg) -> None:
+
+def _add_walk_bus_cost(cfg: ManagerBasedRlEnvCfg, stages_it=WALK_BUS_WEIGHT_STAGES_IT) -> None:
     from mjlab.managers.curriculum_manager import CurriculumTermCfg
     from mjlab.managers.reward_manager import RewardTermCfg
 
@@ -326,7 +333,7 @@ def _add_walk_bus_cost(cfg: ManagerBasedRlEnvCfg) -> None:
         func=microduck_mdp.reward_weight,
         params={
             "reward_name": "bus_current",
-            "weight_stages": [{"step": it * NUM_STEPS_PER_ENV, "weight": -w} for it, w in WALK_BUS_WEIGHT_STAGES_IT],
+            "weight_stages": [{"step": it * NUM_STEPS_PER_ENV, "weight": -w} for it, w in stages_it],
         },
     )
 
@@ -350,8 +357,8 @@ def make_qdd_biped_rough_arms_env_cfg(play: bool = False) -> ManagerBasedRlEnvCf
     _set_arm_home(cfg)
     _set_walk_legs(cfg)
     _add_arm_swing(cfg)
-    _add_ankle_torque_cost(cfg)
-    _add_walk_bus_cost(cfg)
+    _add_ankle_torque_cost(cfg, ROUGH_ANKLE_TORQUE_WEIGHT_STAGES_IT)
+    _add_walk_bus_cost(cfg, ROUGH_BUS_WEIGHT_STAGES_IT)
     return cfg
 
 
