@@ -1,7 +1,7 @@
 {
  "schema_version": 2,
  "name": "hop",
- "description": "両足ジャンプ（足を高く）: 膝105度・胴体32度前傾でしゃがみ、重心が足の上・角運動量0のまま押し出して重心を約3.8cm上げる（離陸0.86m/s）。空中で膝を80度まで畳み、足裏を約8cm浮かせ、着地の前に脚を伸ばしてつま先を20度下げて着地し、膝90度まで沈んで受けて立ち姿勢に戻る。関節の目標・速さ・トルクのフィードフォワードは reference_table（robot repo の analysis/hop_reference.py）。方策はその補正だけを学ぶ。（足首 GIM6010-8 の案 D 用：D のモデルで作り、胴の前傾を変えて押し出しの胴の回転を 6 rad/s 以内にし、空中の膝を上限の 3.5 度手前・足首を 46.5 度・フィードフォワードを 8.7Nm で切った）",
+ "description": "両足ジャンプ（足を高く）: 膝105度・胴体32度前傾でしゃがみ、重心が足の上・角運動量0のまま押し出して重心を約3.6cm上げる（離陸0.84m/s）。空中で膝を80度まで畳み、足裏を約8cm浮かせ、着地の前に脚を伸ばしてつま先を20度下げて着地し、膝90度まで沈んで受けて立ち姿勢に戻る。関節の目標・速さ・トルクのフィードフォワードは reference_table（robot repo の analysis/hop_reference.py）。方策はその補正だけを学ぶ。（足首 GIM6010-8 の案 D 用：D のモデルで作り、胴の前傾を変えて押し出しの胴の回転を 6 rad/s 以内にし、空中の膝を上限の 3.5 度手前・足首を 46.5 度・フィードフォワードを 8.7Nm で切った）",
  "duration_s": 2.6,
  "settle_s": 0.8,
  "interpolation": "pchip",
@@ -14,16 +14,16 @@
    "feet": "both"
   },
   {
-   "t": 1.286,
+   "t": 1.29,
    "feet": "none"
   },
   {
-   "t": 1.462,
+   "t": 1.466,
    "feet": "both"
   }
  ],
  "flight": {
-  "com_rise_m": 0.038,
+  "com_rise_m": 0.036,
   "max_takeoff_speed_mps": 0.9,
   "max_landing_load_mg": 4.0,
   "toe_first": true
@@ -52,25 +52,25 @@
    "note": "hold, then push (time-optimal push of analysis/hop.py)"
   },
   {
-   "t": 1.286,
+   "t": 1.29,
    "joints_deg": {
-    "hip_pitch": -50.1,
-    "knee": 64.0,
-    "ankle_pitch": -29.2
+    "hip_pitch": -48.7,
+    "knee": 62.6,
+    "ankle_pitch": -28.8
    },
-   "note": "take-off: knee 63 deg, CoM 0.86 m/s up, torso 15 deg (zero angular momentum)"
+   "note": "take-off: knee 63 deg, CoM 0.84 m/s up, torso 15 deg (zero angular momentum)"
   },
   {
-   "t": 1.376,
+   "t": 1.379,
    "joints_deg": {
-    "hip_pitch": -57.8,
+    "hip_pitch": -58.7,
     "knee": 106.5,
     "ankle_pitch": -46.5
    },
-   "note": "apex: knee 80 deg, hips 0 deg flexed, soles 7.8 cm up"
+   "note": "apex: knee 80 deg, hips 0 deg flexed, soles 7.7 cm up"
   },
   {
-   "t": 1.462,
+   "t": 1.466,
    "joints_deg": {
     "hip_pitch": -54.9,
     "knee": 80.0,
@@ -79,7 +79,7 @@
    "note": "touchdown toes first (20 deg), knee 80 deg"
   },
   {
-   "t": 1.712,
+   "t": 1.716,
    "joints_deg": {
     "hip_pitch": -59.5,
     "knee": 89.6,
