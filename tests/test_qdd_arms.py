@@ -434,7 +434,7 @@ def test_rough_arms_bus_weight_stays_below_speed_tracking():
     cfg = A.make_qdd_biped_rough_arms_env_cfg()
     st = cfg.curriculum["bus_current_weight"].params["weight_stages"]
     cap = cfg.rewards["bus_current"].params["cap_a"]
-    assert min(s["weight"] for s in st[:-1]) * cap**2 >= -0.9 - 1e-9  # before the 35 A threshold stage
+    assert min(s["weight"] for s in st[:-2]) * cap**2 >= -0.9 - 1e-9  # before the 35 A threshold and uncapped stages
     ank = cfg.curriculum["ankle_torque_weight"].params["weight_stages"]
     assert ank[-1]["weight"] == pytest.approx(-0.07)
 
@@ -459,15 +459,16 @@ def test_rough_arms_bus_threshold_moves_to_the_limit_after_4000_iterations():
     assert min(s["weight"] for s in st) * term.params["cap_a"] ** 2 >= -1.35 - 1e-9
 
 
-def test_rough_overcurrent_termination_stages():
+def test_rough_bus_cost_uncapped_after_5500():
     from mjlab.tasks.registry import load_env_cfg
 
     from mjlab_microduck.tasks import qdd_biped_arms as A
     from mjlab_microduck.tasks.qdd_biped_velocity_env_cfg import NUM_STEPS_PER_ENV
 
     cfg = load_env_cfg(A.ROUGH_ARMS_TASK_ID, play=False)
-    sched = cfg.terminations["bus_overcurrent"].params["limit_schedule"]
-    assert sched[0] == (0, 1.0e9)  # off until the resumed run
-    assert sched[-1] == (7500 * NUM_STEPS_PER_ENV, 35.0)
-    assert all(a > b for (_, a), (_, b) in zip(sched, sched[1:]))  # only lowered
-    assert "bus_overcurrent" not in load_env_cfg(A.VELOCITY_ARMS_TASK_ID, play=False).terminations
+    st = cfg.curriculum["bus_current_cap"].params["stages"]
+    assert st[0]["value"] == A.WALK_BUS_CAP_A and st[-1] == {"step": 5500 * NUM_STEPS_PER_ENV, "value": 1.0e6}
+    w = cfg.curriculum["bus_current_weight"].params["weight_stages"]
+    assert w[-1]["step"] == 5500 * NUM_STEPS_PER_ENV and w[-1]["weight"] < 0
+    # the overcurrent termination taught standing still (rough16): off at every step
+    assert all(a >= 1.0e9 for _, a in cfg.terminations["bus_overcurrent"].params["limit_schedule"])
