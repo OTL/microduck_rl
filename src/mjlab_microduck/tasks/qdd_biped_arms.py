@@ -327,7 +327,7 @@ ROUGH_BUS_THRESHOLD_FROM_IT = 4000
 # episode. From 5500 iterations the cost is uncapped instead: a spike pays (I - 35)^2 x weight,
 # rare enough that walking keeps its ~0.9 / step tracking reward.
 ROUGH_BUS_CAP_STAGES_IT = ((0, WALK_BUS_CAP_A), (5500, 1.0e6))
-ROUGH_BUS_WEIGHT_STAGES_IT = ROUGH_BUS_WEIGHT_STAGES_IT + ((5500, 0.0015),)
+ROUGH_BUS_WEIGHT_STAGES_IT = ROUGH_BUS_WEIGHT_STAGES_IT + ((5500, 0.006),)
 ROUGH_OVERCURRENT_STAGES_IT = ((0, 1.0e9),)  # no overcurrent termination (see above)
 ROUGH_ANKLE_TORQUE_WEIGHT_STAGES_IT = ANKLE_TORQUE_WEIGHT_STAGES_IT[:-1] + ((3000, 0.07),)
 
