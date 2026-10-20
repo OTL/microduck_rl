@@ -40,7 +40,7 @@ from mjlab.utils.spec_config import CollisionCfg
 # the GIM6010-8 ankle model (qdd_biped_ankle6010.xml, generated with MOCHI_ANKLE=GIM6010-8:
 # 388 g ankle motor, ankle->sole 62 mm), its torque / envelope / bus current model, the
 # knee limit 10 deg shallower, and "_ankle6010" experiment names. Unset = option A (GIM3510-8).
-QDD_ANKLE = os.environ.get("QDD_ANKLE", "GIM3510-8")
+QDD_ANKLE = os.environ.get("QDD_ANKLE", "GIM6010-8")
 assert QDD_ANKLE in ("GIM3510-8", "GIM6010-8"), f"QDD_ANKLE={QDD_ANKLE!r}"
 ANKLE_6010 = QDD_ANKLE == "GIM6010-8"
 EXPERIMENT_SUFFIX = "_ankle6010" if ANKLE_6010 else ""
