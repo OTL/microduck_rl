@@ -182,6 +182,8 @@ def run(kind: str, onnx_path: str, a) -> dict:
         bus5_peak_median_a=q(pk, 0.5),
         bus5_peak_max_a=float(pk.max()),
         bus5_over_limit_frac=float((pk > BUS_LIMIT_A).float().mean()),
+        bus5_peak_median_a_upright=q(pk[alive], 0.5) if alive.any() else float("nan"),
+        bus5_over_limit_frac_upright=float((pk[alive] > BUS_LIMIT_A).float().mean()) if alive.any() else float("nan"),
         bus_mean_a=float(bus.mean()),
         ankle_rms_nm_mean=float(ank_rms.mean()),
         ankle_rms_nm_max=float(ank_rms.max()),

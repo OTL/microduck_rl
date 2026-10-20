@@ -457,3 +457,17 @@ def test_rough_arms_bus_threshold_moves_to_the_limit_after_4000_iterations():
     assert term.params["threshold_a"] == 35.0
     st = cfg.curriculum["bus_current_weight"].params["weight_stages"]
     assert min(s["weight"] for s in st) * term.params["cap_a"] ** 2 >= -1.35 - 1e-9
+
+
+def test_rough_overcurrent_termination_stages():
+    from mjlab.tasks.registry import load_env_cfg
+
+    from mjlab_microduck.tasks import qdd_biped_arms as A
+    from mjlab_microduck.tasks.qdd_biped_velocity_env_cfg import NUM_STEPS_PER_ENV
+
+    cfg = load_env_cfg(A.ROUGH_ARMS_TASK_ID, play=False)
+    sched = cfg.terminations["bus_overcurrent"].params["limit_schedule"]
+    assert sched[0] == (0, 1.0e9)  # off until the resumed run
+    assert sched[-1] == (7500 * NUM_STEPS_PER_ENV, 35.0)
+    assert all(a > b for (_, a), (_, b) in zip(sched, sched[1:]))  # only lowered
+    assert "bus_overcurrent" not in load_env_cfg(A.VELOCITY_ARMS_TASK_ID, play=False).terminations

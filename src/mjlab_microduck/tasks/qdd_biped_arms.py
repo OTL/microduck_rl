@@ -320,6 +320,12 @@ ROUGH_BUS_WEIGHT_STAGES_IT = WALK_BUS_WEIGHT_STAGES_IT[:-1] + ((4000, 0.0015),)
 # itself, so the ordinary gait is free and only the spikes pay (cap 30 A over: at most -1.35).
 ROUGH_BUS_THRESHOLD_A = 35.0
 ROUGH_BUS_THRESHOLD_FROM_IT = 4000
+# The bounded cost above did not remove the peaks (arms15 / ad_compare rough: 5 ms average
+# over 35 A in ~60% of upright runs, the excess is clipped at WALK_BUS_CAP_A). From 5500
+# iterations (a resumed run) an episode ENDS when the 5 ms average bus current exceeds a
+# limit lowered in stages (skill_bus_overcurrent, like the jump / get-up): losing the rest of
+# the episode is a bounded but large price, paid only by the peaks themselves.
+ROUGH_OVERCURRENT_STAGES_IT = ((0, 1.0e9), (5500, 80.0), (6000, 60.0), (6500, 48.0), (7000, 40.0), (7500, 35.0))
 ROUGH_ANKLE_TORQUE_WEIGHT_STAGES_IT = ANKLE_TORQUE_WEIGHT_STAGES_IT[:-1] + ((3000, 0.07),)
 
 
@@ -380,6 +386,12 @@ def make_qdd_biped_rough_arms_env_cfg(play: bool = False) -> ManagerBasedRlEnvCf
                 {"step": ROUGH_BUS_THRESHOLD_FROM_IT * NUM_STEPS_PER_ENV, "value": ROUGH_BUS_THRESHOLD_A},
             ],
         },
+    )
+    from mjlab.managers.termination_manager import TerminationTermCfg
+
+    cfg.terminations["bus_overcurrent"] = TerminationTermCfg(
+        func=microduck_mdp.skill_bus_overcurrent,
+        params={"limit_schedule": tuple((it * NUM_STEPS_PER_ENV, a) for it, a in ROUGH_OVERCURRENT_STAGES_IT)},
     )
     return cfg
 
