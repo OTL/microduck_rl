@@ -646,7 +646,7 @@ register_mjlab_task(
     task_id=_QDD_JUMP_ARMSWING_TASK_ID,
     env_cfg=make_qdd_biped_jump_armswing_env_cfg(),
     play_env_cfg=make_qdd_biped_jump_armswing_env_cfg(play=True),
-    rl_cfg=_arms_rl(QddJumpRlCfg, experiment_name="qdd_jump_armswing", run_name="qdd_jump_armswing"),
+    rl_cfg=_arms_rl(QddJumpRlCfg, experiment_name="qdd_jump_armswing", run_name="qdd_jump_armswing", seed=2),
     runner_cls=QddSkillArmSwingOnPolicyRunner,
 )
 register_mjlab_task(
