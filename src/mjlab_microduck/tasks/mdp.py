@@ -7715,6 +7715,10 @@ def qdd_knee_max(hip_pitch: torch.Tensor) -> torch.Tensor:
     k = torch.full_like(hp_deg, QDD_KNEE_MAX_FLOOR_DEG)
     for thr, kmax in QDD_KNEE_MAX_STEPS_DEG:
         k = torch.where(hp_deg > thr, torch.full_like(k, kmax), k)
+    from mjlab_microduck.robot.qdd_biped_constants import ANKLE_6010
+
+    if ANKLE_6010:  # QDD_ANKLE=GIM6010-8: the foot hangs 12 mm lower, fold the knee 10 deg less
+        k = k - 10.0
     return torch.deg2rad(k)
 
 
@@ -9651,11 +9655,14 @@ def qdd_bus_current(env: ManagerBasedRlEnv, asset: Entity, v_bus: float = 22.0) 
     the fallback."""
     from mjlab_microduck.actuator.qdd_motor import KT_6010, R_PH_6010, QddMotorActuator
 
+    from mjlab_microduck.robot.qdd_biped_constants import ANKLE_6010
+
+    small = ("shoulder_pitch", "elbow") if ANKLE_6010 else ("ankle_pitch", "shoulder_pitch", "elbow")
     cache = env.__dict__.setdefault("_qdd_ankle_mask", {})
     if id(asset) not in cache:
         cache[id(asset)] = torch.tensor(
-            # GIM3510-8: the ankles and the arms (tasks/qdd_biped_arms.py)
-            [n.endswith(("ankle_pitch", "shoulder_pitch", "elbow")) for n in asset.joint_names], device=env.device
+            # GIM3510-8: the arms (tasks/qdd_biped_arms.py) and the ankles unless QDD_ANKLE=GIM6010-8
+            [n.endswith(small) for n in asset.joint_names], device=env.device
         )
     ankle = cache[id(asset)]
     tau = asset.data.qfrc_actuator

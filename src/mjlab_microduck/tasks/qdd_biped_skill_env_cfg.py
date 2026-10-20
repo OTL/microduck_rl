@@ -70,6 +70,7 @@ from mjlab.managers import ObservationTermCfg, RewardTermCfg, TerminationTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.rl import RslRlModelCfg
 
+from mjlab_microduck.robot import qdd_biped_constants as _rc
 from mjlab_microduck.robot.qdd_biped_constants import FOOT_SITES
 from mjlab_microduck.tasks import mdp as microduck_mdp
 from mjlab_microduck.tasks import qdd_skill
@@ -102,6 +103,8 @@ RSI_FRACTION = 0.3
 # --- Jumps (spec with a flight phase) -------------------------------------------------
 JUMP_TASK_ID = "Mjlab-Skill-Hop-QddBiped"
 JUMP_SPEC = "hop"  # skills/hop.json (yatai cannot pass $QDD_SKILL_SPEC: own task id)
+if _rc.ANKLE_6010:  # option D: the hop rebuilt on the D model, knee within its shallower limit
+    JUMP_SPEC = "hop_ankle6010"
 JUMP_PHYSICS_DT = 0.0025  # s (explicit PD of the ankle is not stable at 5 ms)
 JUMP_ACTUATOR_MAX_LAG_S = 0.01  # command latency 0-10 ms (as walking)
 # The lag is drawn once per episode (per actuator group), not every physics substep: the

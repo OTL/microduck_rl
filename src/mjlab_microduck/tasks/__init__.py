@@ -604,7 +604,14 @@ class QddBipedGetupChainArmsOnPolicyRunner(MicroduckOnPolicyRunner):
         )
 
 
+from mjlab_microduck.robot.qdd_biped_constants import EXPERIMENT_SUFFIX as _ARMS_SUFFIX
+
+
 def _arms_rl(base, **kw):
+    from mjlab_microduck.robot.qdd_biped_constants import EXPERIMENT_SUFFIX
+
+    if "experiment_name" in kw:  # QDD_ANKLE=GIM6010-8 runs log apart
+        kw["experiment_name"] += EXPERIMENT_SUFFIX
     alg = base.algorithm
     sym = alg.symmetry_cfg
     if sym is not None:
@@ -646,7 +653,7 @@ register_mjlab_task(
     task_id=_QDD_GETUP_ARMS_TASK_ID,
     env_cfg=make_qdd_biped_getup_arms_env_cfg(),
     play_env_cfg=make_qdd_biped_getup_arms_env_cfg(play=True),
-    rl_cfg=replace(QddBipedGetupRlCfg, experiment_name="qdd_biped_getup_arms", run_name="qdd_biped_getup_arms"),
+    rl_cfg=replace(QddBipedGetupRlCfg, experiment_name="qdd_biped_getup_arms" + _ARMS_SUFFIX, run_name="qdd_biped_getup_arms"),
     runner_cls=QddBipedGetupArmsOnPolicyRunner,
 )
 register_mjlab_task(
@@ -662,7 +669,7 @@ register_mjlab_task(
                 "init_std": _QDD_GETUP_SUPINE_INIT_STD,
             },
         ),
-        experiment_name="qdd_biped_getup_supine_arms",
+        experiment_name="qdd_biped_getup_supine_arms" + _ARMS_SUFFIX,
         run_name="qdd_biped_getup_supine_arms",
     ),
     runner_cls=QddBipedGetupSupineArmsOnPolicyRunner,
@@ -680,7 +687,7 @@ register_mjlab_task(
                 "init_std": _QDD_GETUP_SUPINE_INIT_STD,
             },
         ),
-        experiment_name="qdd_biped_getup_chain_arms",
+        experiment_name="qdd_biped_getup_chain_arms" + _ARMS_SUFFIX,
         run_name="qdd_biped_getup_chain_arms",
     ),
     runner_cls=QddBipedGetupChainArmsOnPolicyRunner,

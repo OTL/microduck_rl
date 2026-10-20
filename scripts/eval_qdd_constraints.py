@@ -9,11 +9,13 @@ Every physics substep (the hook on env.sim.step) records, per env:
   - motor bus current (mdp.qdd_bus_current, randomised bus voltage / strength); the largest
     5 ms average is what the LM5069 hot-swap sees (limit 48.5 A minimum since robo PR #49;
     training aims at <= 35 A for the battery sag)
-  - the applied ankle torques (GIM3510-8, rated 1.0 Nm continuous): RMS over the run after
-    the first second, the worse ankle of each env
+  - the applied ankle torques: RMS over the run after the first second, the worse ankle of
+    each env, and the heat ratio (RMS / rated)^2 (rated: GIM3510-8 1.0 Nm, or GIM6010-8
+    5.0 Nm when QDD_ANKLE=GIM6010-8, robot/qdd_biped_constants.ANKLE_RATED_NM)
   - the arm bending moment at the shoulder / elbow joints (mdp.arm_bending_moment; torque
     sensors added to the scene here if the task has none)
 plus the task outcome: walking speed and falls; hop foot clearance and falls; get-up
+CoM rise above the start and peak per-foot landing force in m g; get-up
 stood fraction (torso within 15 deg of upright, height within 3 cm of standing at the end).
 
 The ONNX files are exported with batch 1: rows are run one at a time.
@@ -35,8 +37,9 @@ from mjlab.tasks.registry import load_env_cfg
 from mjlab_microduck.tasks import mdp as microduck_mdp
 from mjlab_microduck.tasks import qdd_biped_arms as A
 
+from mjlab_microduck.robot.qdd_biped_constants import ANKLE_RATED_NM, QDD_ANKLE
+
 BUS_LIMIT_A = 35.0
-ANKLE_RATED_NM = 1.0
 SKIP_S = 1.0  # spawn transient, left out of the RMS and the peaks (walking / rough)
 TASKS = {
     "walk": A.VELOCITY_ARMS_TASK_ID,
@@ -102,7 +105,7 @@ def run(kind: str, onnx_path: str, a) -> dict:
     robot = env.scene["robot"]
     ankle_ids = [i for i, n in enumerate(robot.joint_names) if n.endswith("ankle_pitch")]
     sensors = A.ARM_MOMENT_SENSORS
-    sub = dict(bus=[], ank=[], mom=[], sole=[])
+    sub = dict(bus=[], ank=[], mom=[], sole=[], comz=[])
     sites = None
     if kind == "hop":
         from mjlab_microduck.tasks.qdd_skill import FOOT_HALF_LENGTH_M, FOOT_HALF_WIDTH_M
@@ -117,6 +120,7 @@ def run(kind: str, onnx_path: str, a) -> dict:
         sub["mom"].append(microduck_mdp.arm_bending_moment(env, sensors).clone())
         if sites is not None:
             sub["sole"].append(microduck_mdp.sole_lowest_z(robot, sites, FOOT_HALF_LENGTH_M, FOOT_HALF_WIDTH_M).clone())
+            sub["comz"].append(microduck_mdp.robot_com(env, robot)[0][:, 2].clone())
 
     env.sim.step = hook
     obs, _ = env.reset()
@@ -133,15 +137,23 @@ def run(kind: str, onnx_path: str, a) -> dict:
     vx_sum = torch.zeros(B)
     n_vx = 0
     t_skip = round(SKIP_S / env.step_dt)
+    land_mg = torch.zeros(B)
+    if kind == "hop":
+        feet = env.scene["feet_ground_contact"]
+        weight = microduck_mdp._robot_mass(env, robot) * 9.81
     for k in range(steps):
         x = obs["actor"].numpy().astype(np.float32)
         act = torch.tensor(np.concatenate([sess.run(None, {iname: x[i : i + 1]})[0] for i in range(B)]))
         obs, _, term, trunc, _ = env.step(act)
         alive &= ~term
+        if kind == "hop":  # per-foot peak vertical force over the substeps of this step
+            fh = feet.data.force_history
+            f = fh[..., 2].abs().amax(dim=-1) if fh is not None else feet.data.force[..., 2].abs()
+            land_mg = torch.maximum(land_mg, torch.nan_to_num(f).amax(dim=1) / weight)
         if k >= t_skip:  # body-frame forward speed (a slow yaw drift does not count against it)
             vx_sum += robot.data.root_link_lin_vel_b[:, 0]
             n_vx += 1
-    out = dict(task=task, onnx=onnx_path, n=B)
+    out = dict(task=task, onnx=onnx_path, n=B, ankle=QDD_ANKLE, ankle_rated_nm=ANKLE_RATED_NM)
     if kind in ("walk", "rough"):
         out["vx_cmd"] = a.vx
         out["vx_mean"] = float((vx_sum / max(n_vx, 1))[alive].mean()) if alive.any() else float("nan")
@@ -173,6 +185,8 @@ def run(kind: str, onnx_path: str, a) -> dict:
         bus_mean_a=float(bus.mean()),
         ankle_rms_nm_mean=float(ank_rms.mean()),
         ankle_rms_nm_max=float(ank_rms.max()),
+        ankle_heat_ratio_mean=float((ank_rms / ANKLE_RATED_NM).square().mean()),
+        ankle_heat_ratio_max=float((ank_rms / ANKLE_RATED_NM).square().max()),
         arm_moment_p99_nm=q(mom, 0.99),
         arm_moment_max_nm=float(mom.max()),
         arm_moment_env_peak_median_nm=q(mom.amax(dim=1), 0.5),
@@ -181,6 +195,11 @@ def run(kind: str, onnx_path: str, a) -> dict:
         sole = torch.stack(sub["sole"], 1)[:, skip:]
         clear = sole.amax(dim=1)
         out["foot_clear_cm_median"] = 100 * q(clear, 0.5)
+        comz = torch.stack(sub["comz"], 1)
+        rise = comz.amax(dim=1) - comz[:, 0]
+        out["com_rise_cm_median"] = 100 * q(rise, 0.5)
+        out["landing_mg_median"] = q(land_mg, 0.5)
+        out["landing_mg_max"] = float(land_mg.max())
         out["fell"] = float((~alive).float().mean())
     env.close()
     return out
