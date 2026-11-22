@@ -14,7 +14,9 @@ Every physics substep (the hook on env.sim.step) records, per env:
     5.0 Nm when QDD_ANKLE=GIM6010-8, robot/qdd_biped_constants.ANKLE_RATED_NM)
   - the arm bending moment at the shoulder / elbow joints (mdp.arm_bending_moment; torque
     sensors added to the scene here if the task has none)
-plus the task outcome: walking speed and falls; hop foot clearance and falls; get-up
+plus the task outcome: walking speed and falls (walk: also the swing apex of the feet, the 97th
+minus the 3rd percentile of each foot site's height, flat ground only — run a rough policy
+with `walk` to see its foot lift: the 2026-11-22 ankle runs shuffled at 0.5-1.9 cm); hop foot clearance and falls; get-up
 CoM rise above the start and peak per-foot landing force in m g; get-up
 stood fraction (torso within 15 deg of upright, height within 3 cm of standing at the end).
 
@@ -107,6 +109,8 @@ def run(kind: str, onnx_path: str, a) -> dict:
     sensors = A.ARM_MOMENT_SENSORS
     sub = dict(bus=[], ank=[], mom=[], sole=[], comz=[])
     sites = None
+    feet_z = []
+    foot_sites = [robot.find_sites(n)[0][0] for n in ("l_foot_site", "r_foot_site")] if kind == "walk" else None
     if kind == "hop":
         from mjlab_microduck.tasks.qdd_skill import FOOT_HALF_LENGTH_M, FOOT_HALF_WIDTH_M
 
@@ -150,6 +154,8 @@ def run(kind: str, onnx_path: str, a) -> dict:
             fh = feet.data.force_history
             f = fh[..., 2].abs().amax(dim=-1) if fh is not None else feet.data.force[..., 2].abs()
             land_mg = torch.maximum(land_mg, torch.nan_to_num(f).amax(dim=1) / weight)
+        if foot_sites is not None and k >= t_skip:
+            feet_z.append(robot.data.site_pos_w[:, foot_sites, 2].clone())
         if k >= t_skip:  # body-frame forward speed (a slow yaw drift does not count against it)
             vx_sum += robot.data.root_link_lin_vel_b[:, 0]
             n_vx += 1
@@ -158,6 +164,11 @@ def run(kind: str, onnx_path: str, a) -> dict:
         out["vx_cmd"] = a.vx
         out["vx_mean"] = float((vx_sum / max(n_vx, 1))[alive].mean()) if alive.any() else float("nan")
         out["fell"] = float((~alive).float().mean())
+        if feet_z:
+            z = torch.stack(feet_z, 1)  # [B, T, 2]
+            apex = (torch.quantile(z, 0.97, dim=1) - torch.quantile(z, 0.03, dim=1)).amin(dim=1)  # lower foot
+            out["foot_apex_cm_median"] = 100 * float(apex[alive].median()) if alive.any() else float("nan")
+            out["foot_apex_cm_min"] = 100 * float(apex.min())
     elif kind == "getup":
         up = microduck_mdp.qdd_torso_up(env)
         z = microduck_mdp.qdd_root_height(env)
