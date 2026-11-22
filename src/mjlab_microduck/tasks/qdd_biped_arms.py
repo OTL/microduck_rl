@@ -340,7 +340,7 @@ ROUGH_OVERCURRENT_STAGES_IT = ((0, 1.0e9),)  # no overcurrent termination (see a
 # = -0.28 per step). OTL agreed: resume it with a stronger ankle cost, goal <= 1.0 Nm RMS with
 # falls <= 10 % and vx >= 0.15 m/s. The weight stays below the ~0.9 / step speed tracking at
 # the current torque (lessons L35: a larger cost makes standing still win).
-ROUGH_ANKLE_WEIGHT_1122 = 0.2
+ROUGH_ANKLE_WEIGHT_1122 = 0.12
 ROUGH_ANKLE_FROM_IT_1122 = 5500
 ROUGH_ANKLE_TORQUE_WEIGHT_STAGES_IT = ANKLE_TORQUE_WEIGHT_STAGES_IT[:-1] + (
     (3000, 0.07),
