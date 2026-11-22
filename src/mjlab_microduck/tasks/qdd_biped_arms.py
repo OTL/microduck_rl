@@ -313,7 +313,7 @@ WALK_BUS_WEIGHT_STAGES_IT = ((0, 0.0), (500, 0.0003), (1000, 0.0006), (1500, 0.0
 # terrain (0.01-0.02 m/s for 0.3 commanded): on steps the current peaks are hard to avoid,
 # so the capped cost (0.003 x 30^2 = -2.7 per step) outweighed the speed tracking. Rough
 # keeps the bus weight at 0.001 (at most -0.9 per step) and raises only the ankle cost.
-ROUGH_BUS_WEIGHT_STAGES_IT = WALK_BUS_WEIGHT_STAGES_IT[:-1] + ((4000, 0.0015),)
+ROUGH_BUS_WEIGHT_STAGES_IT = WALK_BUS_WEIGHT_STAGES_IT[:-1] + ((4000, 0.0015),)  # (+ the 2026-11-23 stage below)
 # arms12/14_rough (bus cost above 25 A) still drew 43-57 A median / 110-130 A peaks on rough
 # ground at 0.3 m/s, mostly short spikes when a foot catches an edge. From 4000 iterations (a
 # resumed arms14_rough) the cost only counts the part above ROUGH_BUS_THRESHOLD_A, the limit
@@ -329,11 +329,16 @@ ROUGH_BUS_THRESHOLD_FROM_IT = 4000
 # (rough17 with the uncapped cost was stopped before it was evaluated, 2026-10-20.)
 # Ankle runs of 2026-11-22 (below) resume arms15_rough at 5500 iterations and keep its bus
 # cost (capped, above 35 A) so only the ankle weight changes: the uncapped stage is off.
-ROUGH_BUS_UNCAP_FROM_IT = None  # was 5500 for rough17
+# rough_f (2026-11-23: ankle 0.98 Nm, apex 3.5 cm, falls 8 %, vx 0.17) drew 62 A 5 ms peaks
+# (median env) against 49 A for arms15: the fourth run resumes it (9995) with the uncapped
+# cost above 35 A (a spike pays (I - 35)^2 x weight), the rough17 idea that was never run.
+ROUGH_BUS_UNCAP_FROM_IT = 10000
 ROUGH_BUS_CAP_STAGES_IT = ((0, WALK_BUS_CAP_A),) + (
     ((ROUGH_BUS_UNCAP_FROM_IT, 1.0e6),) if ROUGH_BUS_UNCAP_FROM_IT is not None else ()
 )
 ROUGH_OVERCURRENT_STAGES_IT = ((0, 1.0e9),)  # no overcurrent termination (see above)
+ROUGH_BUS_WEIGHT_1123 = 0.0015  # uncapped from ROUGH_BUS_UNCAP_FROM_IT
+ROUGH_BUS_WEIGHT_STAGES_IT = ROUGH_BUS_WEIGHT_STAGES_IT + ((ROUGH_BUS_UNCAP_FROM_IT, ROUGH_BUS_WEIGHT_1123),)
 # Ankle motor heat, 2026-11-22 (robo docs/motor-bench.md "11/22 夜の足首の発熱試験"): the
 # GIM3510-8 in its shank cup reached 65 C (the sit temperature) in 669 s at 1.0 Nm, 134 s at
 # 1.5 Nm, 16.5 s at 2.0 Nm. arms15_rough walks rough ground at 1.42 Nm RMS (0.07 x 2 x 1.42^2
@@ -342,7 +347,7 @@ ROUGH_OVERCURRENT_STAGES_IT = ((0, 1.0e9),)  # no overcurrent termination (see a
 # the current torque (lessons L35: a larger cost makes standing still win).
 ROUGH_ANKLE_WEIGHT_1122 = 0.12
 ROUGH_ANKLE_FROM_IT_1122 = 5500
-ROUGH_ANKLE_WEIGHT_1123 = 0.15  # the third run, from rough_d (lifted feet)
+ROUGH_ANKLE_WEIGHT_1123 = 0.2  # the third run, from rough_d (lifted feet); rough_f (0.2) won
 ROUGH_ANKLE_FROM_IT_1123 = 8500
 ROUGH_ANKLE_TORQUE_WEIGHT_STAGES_IT = ANKLE_TORQUE_WEIGHT_STAGES_IT[:-1] + (
     (3000, 0.07),

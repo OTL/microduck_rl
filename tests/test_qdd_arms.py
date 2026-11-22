@@ -434,7 +434,7 @@ def test_rough_arms_bus_weight_stays_below_speed_tracking():
     cfg = A.make_qdd_biped_rough_arms_env_cfg()
     st = cfg.curriculum["bus_current_weight"].params["weight_stages"]
     cap = cfg.rewards["bus_current"].params["cap_a"]
-    assert min(s["weight"] for s in st[:-1]) * cap**2 >= -0.9 - 1e-9  # before the 35 A threshold stage
+    assert min(s["weight"] for s in st[:-2]) * cap**2 >= -0.9 - 1e-9  # before the 35 A threshold / uncapped stages
     ank = cfg.curriculum["ankle_torque_weight"].params["weight_stages"]
     assert ank[-3]["weight"] == pytest.approx(-0.07)  # arms14/15; the 2026-11-22/23 stages follow
 
@@ -469,9 +469,10 @@ def test_rough_ankle_runs_1122_change_only_the_ankle_weight():
 
     cfg = load_env_cfg(A.ROUGH_ARMS_TASK_ID, play=False)
     st = cfg.curriculum["bus_current_cap"].params["stages"]
-    assert st == [{"step": 0, "value": A.WALK_BUS_CAP_A}]
+    assert st == [{"step": 0, "value": A.WALK_BUS_CAP_A}, {"step": 10000 * NUM_STEPS_PER_ENV, "value": 1.0e6}]
     w = cfg.curriculum["bus_current_weight"].params["weight_stages"]
-    assert w[-1] == {"step": 4000 * NUM_STEPS_PER_ENV, "weight": -0.0015}
+    assert w[-2] == {"step": 4000 * NUM_STEPS_PER_ENV, "weight": -0.0015}
+    assert w[-1] == {"step": 10000 * NUM_STEPS_PER_ENV, "weight": -A.ROUGH_BUS_WEIGHT_1123}
     ank = cfg.curriculum["ankle_torque_weight"].params["weight_stages"]
     assert ank[-2] == {"step": 5500 * NUM_STEPS_PER_ENV, "weight": -A.ROUGH_ANKLE_WEIGHT_1122}
     assert ank[-1] == {"step": 8500 * NUM_STEPS_PER_ENV, "weight": -A.ROUGH_ANKLE_WEIGHT_1123}
