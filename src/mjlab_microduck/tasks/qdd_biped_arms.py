@@ -342,9 +342,12 @@ ROUGH_OVERCURRENT_STAGES_IT = ((0, 1.0e9),)  # no overcurrent termination (see a
 # the current torque (lessons L35: a larger cost makes standing still win).
 ROUGH_ANKLE_WEIGHT_1122 = 0.12
 ROUGH_ANKLE_FROM_IT_1122 = 5500
+ROUGH_ANKLE_WEIGHT_1123 = 0.15  # the third run, from rough_d (lifted feet)
+ROUGH_ANKLE_FROM_IT_1123 = 8500
 ROUGH_ANKLE_TORQUE_WEIGHT_STAGES_IT = ANKLE_TORQUE_WEIGHT_STAGES_IT[:-1] + (
     (3000, 0.07),
     (ROUGH_ANKLE_FROM_IT_1122, ROUGH_ANKLE_WEIGHT_1122),
+    (ROUGH_ANKLE_FROM_IT_1123, ROUGH_ANKLE_WEIGHT_1123),
 )
 
 
@@ -386,7 +389,10 @@ def make_qdd_biped_velocity_arms_env_cfg(play: bool = False) -> ManagerBasedRlEn
 # ankle cost 0.12 and 0.5 cm with 0.2 (5 cm target): the ankle cost bought a shuffle, the
 # clearance deficit (10 x m) was too weak against it. Stronger lift terms for the second
 # ankle run (resumed from the 0.12 run at 6997 iterations, the ankle weight unchanged).
-ROUGH_SWING_CLEARANCE_WEIGHT = 30.0  # was 10 (the velocity recipe)
+# rough_c (30) / rough_d (50), resumed at 6997 for 1500: flat-ground swing apex 3.3 / 4.2 cm
+# (5 cm target), rough ankle RMS 1.27 / 1.41 Nm, vx 0.20 / 0.21 m/s: lifting costs ankle torque.
+# The third ankle run resumes rough_d (8496) with the clearance 50 and a stronger ankle cost.
+ROUGH_SWING_CLEARANCE_WEIGHT = 50.0
 ROUGH_GAIT_SWING_HEIGHT_WEIGHT = 4.0  # was 2
 
 
