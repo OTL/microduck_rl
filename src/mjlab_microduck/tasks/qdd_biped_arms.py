@@ -386,7 +386,7 @@ def make_qdd_biped_velocity_arms_env_cfg(play: bool = False) -> ManagerBasedRlEn
 # ankle cost 0.12 and 0.5 cm with 0.2 (5 cm target): the ankle cost bought a shuffle, the
 # clearance deficit (10 x m) was too weak against it. Stronger lift terms for the second
 # ankle run (resumed from the 0.12 run at 6997 iterations, the ankle weight unchanged).
-ROUGH_SWING_CLEARANCE_WEIGHT = 30.0  # was 10 (the velocity recipe)
+ROUGH_SWING_CLEARANCE_WEIGHT = 50.0  # variant run
 ROUGH_GAIT_SWING_HEIGHT_WEIGHT = 4.0  # was 2
 
 
