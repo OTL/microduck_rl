@@ -491,3 +491,12 @@ def test_jump_arms_ankle_cost_starts_after_the_jump_is_learned():
         st = cfg.curriculum["ankle_torque_weight"].params["weight_stages"]
         assert st[0]["weight"] == 0.0 and st[-1]["weight"] == -A.HOP_ANKLE_WEIGHT_1122
         assert st[-1]["step"] == A.HOP_ANKLE_FROM_IT_1122 * 24
+
+
+def test_rough_arms_foot_lift_terms_1123():
+    """2026-11-23: the ankle cost made a shuffle; rough ground has stronger lift terms."""
+    from mjlab_microduck.tasks import qdd_biped_arms as A
+
+    cfg = A.make_qdd_biped_rough_arms_env_cfg()
+    assert cfg.rewards["swing_clearance"].weight == -A.ROUGH_SWING_CLEARANCE_WEIGHT < -10.0
+    assert cfg.rewards["gait_swing_height"].weight == A.ROUGH_GAIT_SWING_HEIGHT_WEIGHT > 2.0

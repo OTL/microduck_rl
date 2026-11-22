@@ -381,6 +381,15 @@ def make_qdd_biped_velocity_arms_env_cfg(play: bool = False) -> ManagerBasedRlEn
     return cfg
 
 
+# Foot lift on rough ground (OTL 2026-11-23 "足が全然上がってない"): measured on flat ground at
+# 0.3 m/s, the swing apex was 4.3 cm for arms14_flat, 2.7 cm for arms15_rough, 1.9 cm with the
+# ankle cost 0.12 and 0.5 cm with 0.2 (5 cm target): the ankle cost bought a shuffle, the
+# clearance deficit (10 x m) was too weak against it. Stronger lift terms for the second
+# ankle run (resumed from the 0.12 run at 6997 iterations, the ankle weight unchanged).
+ROUGH_SWING_CLEARANCE_WEIGHT = 30.0  # was 10 (the velocity recipe)
+ROUGH_GAIT_SWING_HEIGHT_WEIGHT = 4.0  # was 2
+
+
 def make_qdd_biped_rough_arms_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     from mjlab_microduck.tasks.qdd_biped_rough_env_cfg import make_qdd_biped_rough_env_cfg
 
@@ -390,6 +399,8 @@ def make_qdd_biped_rough_arms_env_cfg(play: bool = False) -> ManagerBasedRlEnvCf
     _add_arm_swing(cfg)
     _add_ankle_torque_cost(cfg, ROUGH_ANKLE_TORQUE_WEIGHT_STAGES_IT)
     _add_walk_bus_cost(cfg, ROUGH_BUS_WEIGHT_STAGES_IT)
+    cfg.rewards["swing_clearance"].weight = -ROUGH_SWING_CLEARANCE_WEIGHT
+    cfg.rewards["gait_swing_height"].weight = ROUGH_GAIT_SWING_HEIGHT_WEIGHT
     from mjlab.managers.curriculum_manager import CurriculumTermCfg
 
     from mjlab_microduck.tasks import mdp as microduck_mdp
