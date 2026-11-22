@@ -434,9 +434,9 @@ def test_rough_arms_bus_weight_stays_below_speed_tracking():
     cfg = A.make_qdd_biped_rough_arms_env_cfg()
     st = cfg.curriculum["bus_current_weight"].params["weight_stages"]
     cap = cfg.rewards["bus_current"].params["cap_a"]
-    assert min(s["weight"] for s in st[:-2]) * cap**2 >= -0.9 - 1e-9  # before the 35 A threshold and uncapped stages
+    assert min(s["weight"] for s in st[:-1]) * cap**2 >= -0.9 - 1e-9  # before the 35 A threshold stage
     ank = cfg.curriculum["ankle_torque_weight"].params["weight_stages"]
-    assert ank[-1]["weight"] == pytest.approx(-0.07)
+    assert ank[-2]["weight"] == pytest.approx(-0.07)  # arms14/15; the 2026-11-22 stage follows
 
 
 def test_rough_arms_bus_threshold_moves_to_the_limit_after_4000_iterations():
@@ -459,7 +459,9 @@ def test_rough_arms_bus_threshold_moves_to_the_limit_after_4000_iterations():
     assert min(s["weight"] for s in st) * term.params["cap_a"] ** 2 >= -1.35 - 1e-9
 
 
-def test_rough_bus_cost_uncapped_after_5500():
+def test_rough_ankle_runs_1122_change_only_the_ankle_weight():
+    """2026-11-22: resumed from arms15_rough (5499 it), only the ankle weight rises at 5500;
+    the bus cost stays capped as arms15 trained it (the rough17 uncapped stage is off)."""
     from mjlab.tasks.registry import load_env_cfg
 
     from mjlab_microduck.tasks import qdd_biped_arms as A
@@ -467,8 +469,25 @@ def test_rough_bus_cost_uncapped_after_5500():
 
     cfg = load_env_cfg(A.ROUGH_ARMS_TASK_ID, play=False)
     st = cfg.curriculum["bus_current_cap"].params["stages"]
-    assert st[0]["value"] == A.WALK_BUS_CAP_A and st[-1] == {"step": 5500 * NUM_STEPS_PER_ENV, "value": 1.0e6}
+    assert st == [{"step": 0, "value": A.WALK_BUS_CAP_A}]
     w = cfg.curriculum["bus_current_weight"].params["weight_stages"]
-    assert w[-1]["step"] == 5500 * NUM_STEPS_PER_ENV and w[-1]["weight"] < 0
+    assert w[-1] == {"step": 4000 * NUM_STEPS_PER_ENV, "weight": -0.0015}
+    ank = cfg.curriculum["ankle_torque_weight"].params["weight_stages"]
+    assert ank[-1] == {"step": 5500 * NUM_STEPS_PER_ENV, "weight": -A.ROUGH_ANKLE_WEIGHT_1122}
+    # below the speed tracking (~0.9 / step) at arms15's 1.42 Nm RMS on both ankles (L35)
+    assert A.ROUGH_ANKLE_WEIGHT_1122 * 2 * 1.42**2 < 0.9
     # the overcurrent termination taught standing still (rough16): off at every step
     assert all(a >= 1.0e9 for _, a in cfg.terminations["bus_overcurrent"].params["limit_schedule"])
+
+
+def test_jump_arms_ankle_cost_starts_after_the_jump_is_learned():
+    from mjlab.tasks.registry import load_env_cfg
+
+    from mjlab_microduck.tasks import qdd_biped_arms as A
+
+    for task in (A.JUMP_ARMS_TASK_ID, A.JUMP_ARMSWING_TASK_ID):
+        cfg = load_env_cfg(task, play=False)
+        assert cfg.rewards["ankle_torque"].weight == 0.0
+        st = cfg.curriculum["ankle_torque_weight"].params["weight_stages"]
+        assert st[0]["weight"] == 0.0 and st[-1]["weight"] == -A.HOP_ANKLE_WEIGHT_1122
+        assert st[-1]["step"] == A.HOP_ANKLE_FROM_IT_1122 * 24

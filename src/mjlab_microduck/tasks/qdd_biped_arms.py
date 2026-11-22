@@ -326,10 +326,26 @@ ROUGH_BUS_THRESHOLD_FROM_IT = 4000
 # 5500 iterations) taught both ankles to stand still (vx 0.00): one spike cost the rest of the
 # episode. From 5500 iterations the cost is uncapped instead: a spike pays (I - 35)^2 x weight,
 # rare enough that walking keeps its ~0.9 / step tracking reward.
-ROUGH_BUS_CAP_STAGES_IT = ((0, WALK_BUS_CAP_A), (5500, 1.0e6))
-ROUGH_BUS_WEIGHT_STAGES_IT = ROUGH_BUS_WEIGHT_STAGES_IT + ((5500, 0.0015),)
+# (rough17 with the uncapped cost was stopped before it was evaluated, 2026-10-20.)
+# Ankle runs of 2026-11-22 (below) resume arms15_rough at 5500 iterations and keep its bus
+# cost (capped, above 35 A) so only the ankle weight changes: the uncapped stage is off.
+ROUGH_BUS_UNCAP_FROM_IT = None  # was 5500 for rough17
+ROUGH_BUS_CAP_STAGES_IT = ((0, WALK_BUS_CAP_A),) + (
+    ((ROUGH_BUS_UNCAP_FROM_IT, 1.0e6),) if ROUGH_BUS_UNCAP_FROM_IT is not None else ()
+)
 ROUGH_OVERCURRENT_STAGES_IT = ((0, 1.0e9),)  # no overcurrent termination (see above)
-ROUGH_ANKLE_TORQUE_WEIGHT_STAGES_IT = ANKLE_TORQUE_WEIGHT_STAGES_IT[:-1] + ((3000, 0.07),)
+# Ankle motor heat, 2026-11-22 (robo docs/motor-bench.md "11/22 夜の足首の発熱試験"): the
+# GIM3510-8 in its shank cup reached 65 C (the sit temperature) in 669 s at 1.0 Nm, 134 s at
+# 1.5 Nm, 16.5 s at 2.0 Nm. arms15_rough walks rough ground at 1.42 Nm RMS (0.07 x 2 x 1.42^2
+# = -0.28 per step). OTL agreed: resume it with a stronger ankle cost, goal <= 1.0 Nm RMS with
+# falls <= 10 % and vx >= 0.15 m/s. The weight stays below the ~0.9 / step speed tracking at
+# the current torque (lessons L35: a larger cost makes standing still win).
+ROUGH_ANKLE_WEIGHT_1122 = 0.12
+ROUGH_ANKLE_FROM_IT_1122 = 5500
+ROUGH_ANKLE_TORQUE_WEIGHT_STAGES_IT = ANKLE_TORQUE_WEIGHT_STAGES_IT[:-1] + (
+    (3000, 0.07),
+    (ROUGH_ANKLE_FROM_IT_1122, ROUGH_ANKLE_WEIGHT_1122),
+)
 
 
 def _add_walk_bus_cost(cfg: ManagerBasedRlEnvCfg, stages_it=WALK_BUS_WEIGHT_STAGES_IT) -> None:
@@ -407,6 +423,16 @@ def make_qdd_biped_rough_arms_env_cfg(play: bool = False) -> ManagerBasedRlEnvCf
     return cfg
 
 
+# Ankle heat of the jump (2026-11-22, see the rough ankle note): arms10 jumps at 1.7 Nm RMS
+# while the reference's own feed-forward ankle torque is 0.18 Nm RMS (hop_ref.json), so most
+# of it is feedback the policy can trim. The cost starts after the jump has been learned
+# (2000 iterations from scratch, the stage a resumed arms10 enters at once): 0.15 x 2 x 1.7^2
+# = -0.87 per 100 Hz step against ~5 of tracking rewards.
+HOP_ANKLE_WEIGHT_1122 = 0.15
+HOP_ANKLE_FROM_IT_1122 = 2000
+HOP_ANKLE_TORQUE_WEIGHT_STAGES_IT = ((0, 0.0), (HOP_ANKLE_FROM_IT_1122, HOP_ANKLE_WEIGHT_1122))
+
+
 def make_qdd_biped_jump_arms_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     from mjlab_microduck.tasks.qdd_biped_skill_env_cfg import JUMP_SPEC, make_qdd_biped_skill_env_cfg
 
@@ -417,6 +443,7 @@ def make_qdd_biped_jump_arms_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg
     # the jump already has envelope actuators (2.5 ms physics)
     cfg = add_arms_to_env_cfg(make_qdd_biped_skill_env_cfg(JUMP_SPEC, play=play), policy_arms=True)
     _set_arm_home(cfg)  # the jump's arm reference (the default pose) has bent elbows too
+    _add_ankle_torque_cost(cfg, HOP_ANKLE_TORQUE_WEIGHT_STAGES_IT)
     cfg.rewards["arm_pose"] = RewardTermCfg(
         func=microduck_mdp.pose_target_match,
         weight=ARM_POSE_WEIGHT,
