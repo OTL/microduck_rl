@@ -337,7 +337,7 @@ ROUGH_BUS_CAP_STAGES_IT = ((0, WALK_BUS_CAP_A),) + (
     ((ROUGH_BUS_UNCAP_FROM_IT, 1.0e6),) if ROUGH_BUS_UNCAP_FROM_IT is not None else ()
 )
 ROUGH_OVERCURRENT_STAGES_IT = ((0, 1.0e9),)  # no overcurrent termination (see above)
-ROUGH_BUS_WEIGHT_1123 = 0.003  # uncapped from ROUGH_BUS_UNCAP_FROM_IT
+ROUGH_BUS_WEIGHT_1123 = 0.0015  # uncapped from ROUGH_BUS_UNCAP_FROM_IT
 ROUGH_BUS_WEIGHT_STAGES_IT = ROUGH_BUS_WEIGHT_STAGES_IT + ((ROUGH_BUS_UNCAP_FROM_IT, ROUGH_BUS_WEIGHT_1123),)
 # Ankle motor heat, 2026-11-22 (robo docs/motor-bench.md "11/22 夜の足首の発熱試験"): the
 # GIM3510-8 in its shank cup reached 65 C (the sit temperature) in 669 s at 1.0 Nm, 134 s at
