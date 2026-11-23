@@ -362,9 +362,9 @@ ROUGH_ANKLE_WEIGHT_RUN5 = 0.25  # fifth run (see RUN5_FROM_IT); rough_i, k, l
 #     every substep so the predicted bus current stays below it (None = off).
 #   RUN8_OVERCURRENT_STAGES_IT: terminate when the 5 ms average exceeds the limit, lowered
 #     slowly from 120 A to 50 A (rough16 stood still when it dropped straight to 35 A).
-ROUGH_BUS_LIMITER_A = 42.0  # eighth run, variant L: below 48.5 A with the ~5 A substep overshoot
+ROUGH_BUS_LIMITER_A = None
 RUN8_FROM_IT = 16000
-RUN8_OVERCURRENT_STAGES_IT = None
+RUN8_OVERCURRENT_STAGES_IT = ((RUN8_FROM_IT, 120.0), (RUN8_FROM_IT + 300, 90.0), (RUN8_FROM_IT + 600, 70.0), (RUN8_FROM_IT + 900, 50.0))
 ROUGH_ANKLE_TORQUE_WEIGHT_STAGES_IT = ANKLE_TORQUE_WEIGHT_STAGES_IT[:-1] + (
     (3000, 0.07),
     (ROUGH_ANKLE_FROM_IT_1122, ROUGH_ANKLE_WEIGHT_1122),
