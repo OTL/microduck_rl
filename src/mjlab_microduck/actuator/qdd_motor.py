@@ -144,7 +144,7 @@ class QddMotorActuator(IdealPdActuator[QddMotorActuatorCfg]):
             self.strength[env_ids] = strength.reshape(-1, 1)
 
 
-def _bus_power_terms(entity: "Entity", tau: torch.Tensor, w: torch.Tensor, small: torch.Tensor):
+def _bus_power_terms(entity: Entity, tau: torch.Tensor, w: torch.Tensor, small: torch.Tensor):
     """(A, Bq, P_small, V) per env for the bus current model of tasks/mdp.qdd_bus_current:
     GIM6010-8 power = tau w + 1.5 R (tau / Kt)^2 (A = sum tau w, Bq = sum of the copper
     term, both over the 6010 joints), GIM3510-8 = tau w / 0.7 motoring, x 0.7 braking."""
@@ -159,7 +159,7 @@ def _bus_power_terms(entity: "Entity", tau: torch.Tensor, w: torch.Tensor, small
     return a, bq, psm, v
 
 
-def install_bus_current_limiter(entity: "Entity", limit_a: float) -> None:
+def install_bus_current_limiter(entity: Entity, limit_a: float) -> None:
     """Software bus current limiter (robot side: the controller scales the GIM6010-8 torque
     commands so the predicted bus current stays below the LM5069 trip, 48.5 A min).
     Every physics substep, after all actuators computed their torques, the hip / knee

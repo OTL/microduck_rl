@@ -538,7 +538,7 @@ def test_bus_current_limiter_caps_the_predicted_current():
     small = torch.tensor([False, False, True])
     tau = torch.tensor([[8.0, 6.0, 1.0]])
     w = torch.tensor([[10.0, 8.0, 2.0]])
-    a, bq, psm, v = _bus_power_terms(E(), tau, w, small)
+    a, bq, psm, _v = _bus_power_terms(E(), tau, w, small)
     assert torch.isclose(a, torch.tensor([128.0]))
     assert torch.isclose(bq, torch.tensor([1.5 * R_PH_6010 * (64 + 36) / KT_6010**2]))
     assert torch.isclose(psm, torch.tensor([2.0 / 0.7]))
