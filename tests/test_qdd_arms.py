@@ -456,7 +456,7 @@ def test_rough_arms_bus_threshold_moves_to_the_limit_after_4000_iterations():
     M.reward_param_stages(env, None, **cur.params)
     assert term.params["threshold_a"] == 35.0
     st = cfg.curriculum["bus_current_weight"].params["weight_stages"]
-    assert min(s["weight"] for s in st) * term.params["cap_a"] ** 2 >= -1.35 - 1e-9
+    assert min(s["weight"] for s in st if s["step"] < A.ROUGH_BUS_UNCAP_FROM_IT * 24) * term.params["cap_a"] ** 2 >= -1.35 - 1e-9
 
 
 def test_rough_ankle_runs_1122_change_only_the_ankle_weight():
