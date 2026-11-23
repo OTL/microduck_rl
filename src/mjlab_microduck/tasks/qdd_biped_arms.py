@@ -342,7 +342,7 @@ ROUGH_BUS_WEIGHT_STAGES_IT = ROUGH_BUS_WEIGHT_STAGES_IT + ((ROUGH_BUS_UNCAP_FROM
 # Fifth run (2026-11-23): resume rough_g (bus 0.0015, 11494: ankle 1.09 Nm, falls 2 %, 55 A).
 # rough_h (0.003) reached 44 A but fell 23 %; this run tries the middle and a stronger ankle.
 RUN5_FROM_IT = 11500
-ROUGH_BUS_WEIGHT_RUN5 = 0.002
+ROUGH_BUS_WEIGHT_RUN5 = 0.0015
 ROUGH_BUS_WEIGHT_STAGES_IT = ROUGH_BUS_WEIGHT_STAGES_IT + ((RUN5_FROM_IT, ROUGH_BUS_WEIGHT_RUN5),)
 # Ankle motor heat, 2026-11-22 (robo docs/motor-bench.md "11/22 夜の足首の発熱試験"): the
 # GIM3510-8 in its shank cup reached 65 C (the sit temperature) in 669 s at 1.0 Nm, 134 s at
@@ -354,7 +354,17 @@ ROUGH_ANKLE_WEIGHT_1122 = 0.12
 ROUGH_ANKLE_FROM_IT_1122 = 5500
 ROUGH_ANKLE_WEIGHT_1123 = 0.2  # the third run, from rough_d (lifted feet); rough_f (0.2) won
 ROUGH_ANKLE_FROM_IT_1123 = 8500
-ROUGH_ANKLE_WEIGHT_RUN5 = 0.2  # fifth run (see RUN5_FROM_IT)
+ROUGH_ANKLE_WEIGHT_RUN5 = 0.25  # fifth run (see RUN5_FROM_IT); rough_i, k, l
+# 2026-11-23 bus current spikes (eighth run): without falls, rough_k still draws 51 A 5 ms
+# peaks (median env, 9 s), above the LM5069 trip (48.5-61.5 A, 4.7 ms) that cuts the motor
+# power -> a fall the training never saw. Two variants, both resumed from rough_l:
+#   ROUGH_BUS_LIMITER_A: a software limiter (also on the robot) scales the hip / knee torques
+#     every substep so the predicted bus current stays below it (None = off).
+#   RUN8_OVERCURRENT_STAGES_IT: terminate when the 5 ms average exceeds the limit, lowered
+#     slowly from 120 A to 50 A (rough16 stood still when it dropped straight to 35 A).
+ROUGH_BUS_LIMITER_A = None
+RUN8_FROM_IT = 16000
+RUN8_OVERCURRENT_STAGES_IT = None
 ROUGH_ANKLE_TORQUE_WEIGHT_STAGES_IT = ANKLE_TORQUE_WEIGHT_STAGES_IT[:-1] + (
     (3000, 0.07),
     (ROUGH_ANKLE_FROM_IT_1122, ROUGH_ANKLE_WEIGHT_1122),
@@ -447,8 +457,19 @@ def make_qdd_biped_rough_arms_env_cfg(play: bool = False) -> ManagerBasedRlEnvCf
 
     cfg.terminations["bus_overcurrent"] = TerminationTermCfg(
         func=microduck_mdp.skill_bus_overcurrent,
-        params={"limit_schedule": tuple((it * NUM_STEPS_PER_ENV, a) for it, a in ROUGH_OVERCURRENT_STAGES_IT)},
+        params={
+            "limit_schedule": tuple(
+                (it * NUM_STEPS_PER_ENV, a)
+                for it, a in ROUGH_OVERCURRENT_STAGES_IT + (RUN8_OVERCURRENT_STAGES_IT or ())
+            )
+        },
     )
+    if ROUGH_BUS_LIMITER_A is not None:
+        from mjlab.managers.event_manager import EventTermCfg
+
+        cfg.events["bus_current_limiter"] = EventTermCfg(
+            func=microduck_mdp.qdd_install_bus_limiter, mode="startup", params={"limit_a": ROUGH_BUS_LIMITER_A}
+        )
     return cfg
 
 

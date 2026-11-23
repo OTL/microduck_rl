@@ -10036,3 +10036,12 @@ def getup_ref_phase(env: ManagerBasedRlEnv, action_name: str = "joint_pos") -> t
     assert isinstance(term, GetupReferenceJointPositionAction)
     s = term.phase()
     return torch.stack([torch.sin(math.pi * s), torch.cos(math.pi * s)], dim=1)
+
+
+def qdd_install_bus_limiter(env: ManagerBasedRlEnv, env_ids, limit_a: float = 45.0, asset_name: str = "robot") -> None:
+    """STARTUP EVENT: install the software bus current limiter on the robot
+    (actuator/qdd_motor.install_bus_current_limiter): every substep the hip / knee
+    torques are scaled so the predicted motor bus current stays <= limit_a."""
+    from mjlab_microduck.actuator.qdd_motor import install_bus_current_limiter
+
+    install_bus_current_limiter(env.scene[asset_name], limit_a)

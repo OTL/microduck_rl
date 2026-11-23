@@ -142,3 +142,63 @@ class QddMotorActuator(IdealPdActuator[QddMotorActuatorCfg]):
             self.v_bus[env_ids] = v_bus.reshape(-1, 1)
         if strength is not None:
             self.strength[env_ids] = strength.reshape(-1, 1)
+
+
+def _bus_power_terms(entity: "Entity", tau: torch.Tensor, w: torch.Tensor, small: torch.Tensor):
+    """(A, Bq, P_small, V) per env for the bus current model of tasks/mdp.qdd_bus_current:
+    GIM6010-8 power = tau w + 1.5 R (tau / Kt)^2 (A = sum tau w, Bq = sum of the copper
+    term, both over the 6010 joints), GIM3510-8 = tau w / 0.7 motoring, x 0.7 braking."""
+    act = next((a for a in entity.actuators if isinstance(a, QddMotorActuator) and a.v_bus is not None), None)
+    v = act.v_bus[:, 0] if act is not None else torch.full((tau.shape[0],), V_BUS_NOMINAL, device=tau.device)
+    kt = KT_6010 * act.strength if act is not None else KT_6010
+    big = ~small
+    pw = tau * w
+    a = torch.where(big, pw, 0.0).sum(1)
+    bq = torch.where(big, 1.5 * R_PH_6010 * torch.square(tau / kt), 0.0).sum(1)
+    psm = torch.where(small, torch.where(pw > 0, pw / 0.7, pw * 0.7), 0.0).sum(1)
+    return a, bq, psm, v
+
+
+def install_bus_current_limiter(entity: "Entity", limit_a: float) -> None:
+    """Software bus current limiter (robot side: the controller scales the GIM6010-8 torque
+    commands so the predicted bus current stays below the LM5069 trip, 48.5 A min).
+    Every physics substep, after all actuators computed their torques, the hip / knee
+    (GIM6010-8) torques are scaled by one factor s in [0, 1] per env so that the predicted
+    bus current (same model as tasks/mdp.qdd_bus_current) is <= limit_a. The ankles and
+    arms (GIM3510-8, ~1 A) are not scaled. Patches the entity's _apply_actuator_controls;
+    the last factor is kept in entity.bus_limiter_scale."""
+    if getattr(entity, "_bus_limiter_installed", False):
+        return
+    names = list(entity.joint_names)
+    orig = entity._apply_actuator_controls
+    st: dict = {}
+
+    def apply() -> None:
+        orig()
+        data = entity._data
+        acts = [a for a in entity._custom_actuators if isinstance(a, QddMotorActuator)]
+        if not acts:
+            return
+        w = data.joint_vel
+        dev = w.device
+        if not st:
+            st["small"] = torch.tensor([n.endswith(("ankle_pitch", "shoulder_pitch", "elbow")) for n in names], device=dev)
+            st["idx"] = [(a.ctrl_ids, a.target_ids, data.indexing.ctrl_ids[a.ctrl_ids]) for a in acts]
+        tau = torch.zeros_like(w)
+        for _, jids, gids in st["idx"]:
+            tau[:, jids] = data.data.ctrl[:, gids]
+        a, bq, psm, v = _bus_power_terms(entity, tau, w, st["small"])
+        plim = limit_a * v
+        c = psm - plim
+        disc = torch.clamp(a * a - 4 * bq * c, min=0.0)
+        s_quad = (-a + torch.sqrt(disc)) / torch.clamp(2 * bq, min=1e-9)
+        s_lin = torch.where(a > 1e-9, -c / torch.clamp(a, min=1e-9), torch.ones_like(a))
+        s = torch.where(bq > 1e-6, s_quad, s_lin).clamp(0.0, 1.0)
+        s = torch.where(a + bq + psm > plim, s, torch.ones_like(s))
+        entity.__dict__["bus_limiter_scale"] = s
+        scale = torch.where(st["small"], torch.ones_like(tau), s[:, None])
+        for cids, jids, _ in st["idx"]:
+            data.write_ctrl(tau[:, jids] * scale[:, jids], cids)
+
+    entity._apply_actuator_controls = apply
+    entity.__dict__["_bus_limiter_installed"] = True

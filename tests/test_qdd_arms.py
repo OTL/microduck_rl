@@ -506,3 +506,39 @@ def test_rough_arms_foot_lift_terms_1123():
     cfg = A.make_qdd_biped_rough_arms_env_cfg()
     assert cfg.rewards["swing_clearance"].weight == -A.ROUGH_SWING_CLEARANCE_WEIGHT < -10.0
     assert cfg.rewards["gait_swing_height"].weight == A.ROUGH_GAIT_SWING_HEIGHT_WEIGHT > 2.0
+
+
+def test_rough_arms_bus_limiter_and_overcurrent_variants_are_off_by_default():
+    """2026-11-23 eighth run: the limiter / staged overcurrent termination are switched on
+    per variant commit; the base keeps rough_i / k / l's settings (ankle 0.25, bus 0.0015)."""
+    from mjlab_microduck.tasks import qdd_biped_arms as A
+
+    assert A.ROUGH_ANKLE_WEIGHT_RUN5 == 0.25 and A.ROUGH_BUS_WEIGHT_RUN5 == 0.0015
+    cfg = A.make_qdd_biped_rough_arms_env_cfg()
+    if A.ROUGH_BUS_LIMITER_A is None:
+        assert "bus_current_limiter" not in cfg.events
+    else:
+        assert cfg.events["bus_current_limiter"].params["limit_a"] < 48.5  # below the LM5069 trip
+    st = cfg.terminations["bus_overcurrent"].params["limit_schedule"]
+    if A.RUN8_OVERCURRENT_STAGES_IT is None:
+        assert all(a >= 1.0e9 for _, a in st)
+    else:
+        lim = [a for _, a in st if a < 1.0e9]
+        assert lim == sorted(lim, reverse=True) and lim[-1] >= 48.5  # lowered slowly, never below the trip
+
+
+def test_bus_current_limiter_caps_the_predicted_current():
+    import torch
+
+    from mjlab_microduck.actuator.qdd_motor import KT_6010, R_PH_6010, _bus_power_terms
+
+    class E:  # no QddMotorActuator -> nominal 22 V, Kt
+        actuators = ()
+
+    small = torch.tensor([False, False, True])
+    tau = torch.tensor([[8.0, 6.0, 1.0]])
+    w = torch.tensor([[10.0, 8.0, 2.0]])
+    a, bq, psm, v = _bus_power_terms(E(), tau, w, small)
+    assert torch.isclose(a, torch.tensor([128.0]))
+    assert torch.isclose(bq, torch.tensor([1.5 * R_PH_6010 * (64 + 36) / KT_6010**2]))
+    assert torch.isclose(psm, torch.tensor([2.0 / 0.7]))
