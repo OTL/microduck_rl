@@ -342,7 +342,7 @@ ROUGH_BUS_WEIGHT_STAGES_IT = ROUGH_BUS_WEIGHT_STAGES_IT + ((ROUGH_BUS_UNCAP_FROM
 # Fifth run (2026-11-23): resume rough_g (bus 0.0015, 11494: ankle 1.09 Nm, falls 2 %, 55 A).
 # rough_h (0.003) reached 44 A but fell 23 %; this run tries the middle and a stronger ankle.
 RUN5_FROM_IT = 11500
-ROUGH_BUS_WEIGHT_RUN5 = 0.0015
+ROUGH_BUS_WEIGHT_RUN5 = 0.002
 ROUGH_BUS_WEIGHT_STAGES_IT = ROUGH_BUS_WEIGHT_STAGES_IT + ((RUN5_FROM_IT, ROUGH_BUS_WEIGHT_RUN5),)
 # Ankle motor heat, 2026-11-22 (robo docs/motor-bench.md "11/22 夜の足首の発熱試験"): the
 # GIM3510-8 in its shank cup reached 65 C (the sit temperature) in 669 s at 1.0 Nm, 134 s at
@@ -354,7 +354,7 @@ ROUGH_ANKLE_WEIGHT_1122 = 0.12
 ROUGH_ANKLE_FROM_IT_1122 = 5500
 ROUGH_ANKLE_WEIGHT_1123 = 0.2  # the third run, from rough_d (lifted feet); rough_f (0.2) won
 ROUGH_ANKLE_FROM_IT_1123 = 8500
-ROUGH_ANKLE_WEIGHT_RUN5 = 0.25  # fifth run (see RUN5_FROM_IT)
+ROUGH_ANKLE_WEIGHT_RUN5 = 0.2  # fifth run (see RUN5_FROM_IT)
 ROUGH_ANKLE_TORQUE_WEIGHT_STAGES_IT = ANKLE_TORQUE_WEIGHT_STAGES_IT[:-1] + (
     (3000, 0.07),
     (ROUGH_ANKLE_FROM_IT_1122, ROUGH_ANKLE_WEIGHT_1122),
