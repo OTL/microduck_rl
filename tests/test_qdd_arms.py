@@ -482,8 +482,8 @@ def test_rough_ankle_runs_1122_change_only_the_ankle_weight():
     assert A.ROUGH_ANKLE_WEIGHT_RUN5 * 2 * 1.1**2 < 0.9
     # below the speed tracking (~0.9 / step) at arms15's 1.42 Nm RMS on both ankles (L35)
     assert A.ROUGH_ANKLE_WEIGHT_1122 * 2 * 1.42**2 < 0.9
-    # the overcurrent termination taught standing still (rough16): off at every step
-    assert all(a >= 1.0e9 for _, a in cfg.terminations["bus_overcurrent"].params["limit_schedule"])
+    # the overcurrent termination taught standing still (rough16): off until the eighth run's staged limit
+    assert all(a >= 1.0e9 for s, a in cfg.terminations["bus_overcurrent"].params["limit_schedule"] if s < A.RUN8_FROM_IT * NUM_STEPS_PER_ENV)
 
 
 def test_jump_arms_ankle_cost_starts_after_the_jump_is_learned():
